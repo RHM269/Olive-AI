@@ -1,0 +1,39 @@
+# Secrets / local environment
+.env
+.env.*
+!.env.example
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Testing / coverage
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+
+# Packaging
+*.egg-info/
+build/
+dist/
+
+# Editors / OS
+.DS_Store
+.idea/
+.vscode/
+
+# Logs
+*.log
+
+# Future local data/model directories (not yet used in Phase 1, but
+# generated data should never be committed once later phases add it)
+/data/
+/models/
+*.zip
