@@ -1,0 +1,31 @@
+{
+  "source": "CME Group product specifications: E-mini Nasdaq-100 Futures (NQ) and Micro E-mini Nasdaq-100 Futures (MNQ).",
+  "as_of": "2026-10-01",
+  "note": "Stable Phase 2 contract-economics metadata only. No provider credentials, prices, or strategy settings belong in this file.",
+  "instruments": [
+    {
+      "root_symbol": "NQ",
+      "display_name": "E-mini Nasdaq-100 Futures",
+      "exchange": "CME",
+      "underlying": "Nasdaq-100 Index",
+      "currency": "USD",
+      "multiplier": "20",
+      "tick_size": "0.25",
+      "tick_value": "5.00",
+      "settlement_type": "CASH",
+      "contract_months": [3, 6, 9, 12]
+    },
+    {
+      "root_symbol": "MNQ",
+      "display_name": "Micro E-mini Nasdaq-100 Futures",
+      "exchange": "CME",
+      "underlying": "Nasdaq-100 Index",
+      "currency": "USD",
+      "multiplier": "2",
+      "tick_size": "0.25",
+      "tick_value": "0.50",
+      "settlement_type": "CASH",
+      "contract_months": [3, 6, 9, 12]
+    }
+  ]
+}

@@ -18,16 +18,21 @@ from datetime import datetime, timezone
 from enum import Enum
 
 from app.config import Settings
+from app.futures.models import FuturesDomainError
+from app.futures.registry import load_instrument_registry
+from app.futures.calendar import load_cycle_date_calendar
+from app.futures.validation import validate_olive_futures_domain
 
 
 class HealthState(str, Enum):
     """The possible states of an Olive component.
 
     ``NOT_IMPLEMENTED`` and ``NOT_CONFIGURED`` are deliberately
-    distinct: a component that does not exist yet (e.g. the futures
-    domain in Phase 1) is ``NOT_IMPLEMENTED``, while a component that
-    exists but is missing required configuration (e.g. a data provider
-    with no API key, in a later phase) is ``NOT_CONFIGURED``.
+    distinct: a component that does not exist yet (e.g. historical
+    market data before Phase 3) is ``NOT_IMPLEMENTED``, while a
+    component that exists but is missing required configuration (e.g.
+    a data provider with no API key, in a later phase) is
+    ``NOT_CONFIGURED``.
     """
 
     ONLINE = "ONLINE"
@@ -69,11 +74,11 @@ class SystemHealth:
         return system is not None and system.state is HealthState.ONLINE
 
 
-# Components not yet implemented in Phase 1, with the phase that will
-# build them. Kept as simple (name, phase) pairs rather than scattering
-# magic strings through get_system_health().
+# Components not yet implemented, with the phase that will build them.
+# Kept as simple (name, phase) pairs rather than scattering magic
+# strings through get_system_health(). "Futures domain" is handled
+# separately below via a real check now that Phase 2 implements it.
 _NOT_YET_IMPLEMENTED: tuple[tuple[str, str], ...] = (
-    ("Futures domain", "Phase 2"),
     ("Historical market data", "Phase 3"),
     ("Real-time market data", "Phase 4"),
     ("Feature engine", "Phase 5"),
@@ -87,16 +92,68 @@ _NOT_YET_IMPLEMENTED: tuple[tuple[str, str], ...] = (
 )
 
 
+def _check_futures_domain() -> ComponentHealth:
+    """Real health check for the futures domain (Phase 2).
+
+    Verifies the instrument registry actually loads, that the
+    quarterly cycle-date calendar loads, and -- as of Phase 2.4 --
+    that both actually satisfy Olive's required PRODUCTION NQ/MNQ
+    domain, via ``app.futures.validation.validate_olive_futures_domain``.
+    That single production-validation call absorbs what used to be a
+    hand-rolled tradable-roots check here (exactly one home for that
+    invariant now) and adds what a fourth external audit found this
+    health check was still missing: confirming the loaded NQ/MNQ
+    entries actually describe the real NQ/MNQ product, and that
+    Olive's required source-backed official calendar coverage (see
+    ``app.futures.validation.OLIVE_REQUIRED_OFFICIAL_CYCLE_DATES``)
+    hasn't silently disappeared or drifted. A structurally valid but
+    factually wrong NQ/MNQ configuration, or a truncated calendar, can
+    no longer report CONFIGURED. Any legitimate domain problem is
+    reported as ERROR rather than crashing the whole health report or
+    silently claiming CONFIGURED.
+    """
+    try:
+        registry = load_instrument_registry()
+    except FuturesDomainError as exc:
+        return ComponentHealth(
+            name="Futures domain",
+            state=HealthState.ERROR,
+            detail=f"Instrument registry failed to load: {exc}",
+        )
+
+    try:
+        cycle_calendar = load_cycle_date_calendar()
+    except FuturesDomainError as exc:
+        return ComponentHealth(
+            name="Futures domain",
+            state=HealthState.ERROR,
+            detail=f"Cycle-date calendar failed to load: {exc}",
+        )
+
+    try:
+        validate_olive_futures_domain(registry, cycle_calendar)
+    except FuturesDomainError as exc:
+        return ComponentHealth(
+            name="Futures domain",
+            state=HealthState.ERROR,
+            detail=f"Production futures-domain validation failed: {exc}",
+        )
+
+    return ComponentHealth(
+        name="Futures domain",
+        state=HealthState.CONFIGURED,
+        detail=f"{', '.join(registry.roots)} loaded; cycle calendar as_of {cycle_calendar.as_of}.",
+    )
+
+
 def get_system_health(settings: Settings) -> SystemHealth:
     """Build Olive's current, truthful system health snapshot.
 
-    Phase 1 only implements the application itself and its
-    configuration layer, so only ``System`` and ``Configuration`` are
-    reported as operational. Every other subsystem is honestly
-    reported as ``NOT_IMPLEMENTED`` -- Olive has no futures domain, no
-    market data, no features, no strategies, no predictions, no
-    signals, no backtesting, no paper trading, no alerts, and no web
-    interface yet.
+    ``System``, ``Configuration``, and (as of Phase 2) ``Futures
+    domain`` are reported as real, verified state. Every subsystem
+    still unimplemented (market data, features, strategies,
+    predictions, signals, backtesting, paper trading, alerts, web) is
+    honestly reported as ``NOT_IMPLEMENTED``.
     """
     components: list[ComponentHealth] = [
         ComponentHealth(
@@ -112,6 +169,7 @@ def get_system_health(settings: Settings) -> SystemHealth:
                 f"data_mode={settings.data_mode.value}"
             ),
         ),
+        _check_futures_domain(),
     ]
 
     for name, phase in _NOT_YET_IMPLEMENTED:

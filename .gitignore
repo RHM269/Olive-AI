@@ -32,8 +32,8 @@ dist/
 # Logs
 *.log
 
-# Future local data/model directories (not yet used in Phase 1, but
-# generated data should never be committed once later phases add it)
+# Future local data/model directories (not yet in active use, but
+# generated data should never be committed once a later phase adds it)
 /data/
 /models/
 *.zip

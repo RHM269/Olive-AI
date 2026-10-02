@@ -1,0 +1,24 @@
+{
+  "source": "CME Group equity index futures quarterly expiration calendar, combined with the customary U.S. equity-index roll convention (Monday prior to the third Friday of the expiration month).",
+  "as_of": "2026-10-01",
+  "covered_years": [2025, 2026, 2027, 2028],
+  "note": "This table is finite and source-backed only for the years listed. It is NOT a complete or permanently extending CME holiday calendar. A (year, month) pair outside this table must fall back to a calculated-nominal date that is explicitly labeled as non-authoritative.",
+  "dates": [
+    {"year": 2025, "month": 3,  "expiration": "2025-03-21", "roll": "2025-03-17"},
+    {"year": 2025, "month": 6,  "expiration": "2025-06-20", "roll": "2025-06-16"},
+    {"year": 2025, "month": 9,  "expiration": "2025-09-19", "roll": "2025-09-15"},
+    {"year": 2025, "month": 12, "expiration": "2025-12-19", "roll": "2025-12-15"},
+    {"year": 2026, "month": 3,  "expiration": "2026-03-20", "roll": "2026-03-16"},
+    {"year": 2026, "month": 6,  "expiration": "2026-06-18", "roll": "2026-06-15"},
+    {"year": 2026, "month": 9,  "expiration": "2026-09-18", "roll": "2026-09-14"},
+    {"year": 2026, "month": 12, "expiration": "2026-12-18", "roll": "2026-12-14"},
+    {"year": 2027, "month": 3,  "expiration": "2027-03-19", "roll": "2027-03-15"},
+    {"year": 2027, "month": 6,  "expiration": "2027-06-18", "roll": "2027-06-14"},
+    {"year": 2027, "month": 9,  "expiration": "2027-09-17", "roll": "2027-09-13"},
+    {"year": 2027, "month": 12, "expiration": "2027-12-17", "roll": "2027-12-13"},
+    {"year": 2028, "month": 3,  "expiration": "2028-03-17", "roll": "2028-03-13"},
+    {"year": 2028, "month": 6,  "expiration": "2028-06-16", "roll": "2028-06-12"},
+    {"year": 2028, "month": 9,  "expiration": "2028-09-15", "roll": "2028-09-11"},
+    {"year": 2028, "month": 12, "expiration": "2028-12-15", "roll": "2028-12-11"}
+  ]
+}
