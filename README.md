@@ -9,9 +9,126 @@ guaranteed outcomes.
 
 ## Current Status
 
+**Phase 3 — Historical Market Data**, corrected by a **Phase 3.1
+safety & integrity hardening pass**, a **Phase 3.2 final historical
+integrity correction**, a **Phase 3.3 canonical historical storage
+finalization**, a **Phase 3.3 QA compliance rework**, and the **Phase 3
+final completion pass** (each a process correction to the same Phase
+3 delivery -- not a new phase), following independent review of the
+previously delivered build each time. Phase 3 is now considered
+complete and consolidated; see `olive-phase3-final.zip`'s completion
+report for the final compliance ledger.
+
+Olive AI can now fetch, validate, and durably store historical OHLCV
+bars for its exact NQ/MNQ production universe from a configured
+provider (Databento), strictly on explicit request. By default
+(and in every test run), **no provider is configured, network access
+is disabled, and the spending limit is zero** -- nothing in this build
+can download real market data or incur cost without an operator
+deliberately setting `OLIVE_HISTORICAL_PROVIDER=databento`,
+`DATABENTO_API_KEY`, `OLIVE_HISTORICAL_NETWORK_ENABLED=true`, and a
+non-zero `OLIVE_HISTORICAL_MAX_REQUEST_COST_USD`. See
+`docs/historical_data.md` for the full write-up, including the
+Phase 3.1 (§16), Phase 3.2 (§17), and Phase 3.3 (§18) correction
+summaries and this build's known limitations (the `databento`/
+`pyarrow` packages could not be installed in this build sandbox -- see
+that document's §14).
+
+The Phase 3.1 pass fixed several substantive findings from independent
+review without changing Phase 3's scope: a `Settings` construction
+path that could silently bypass the network kill switch; a vendor
+error-translation path that could leak the API key through its own
+message text; Databento's documented raw-symbol year-reuse problem
+(`NQZ6` means a different contract in 2016/2026/2036), now guarded by
+a symbology-resolution identity-safety gate before any paid fetch; a
+non-transactional Parquet+manifest write pair; a manifest that was
+written but never verified on read; and roughly a dozen smaller
+public-boundary hardening fixes. See `docs/historical_data.md` §16 for
+the full list.
+
+The Phase 3.2 pass fixed further findings discovered by adversarially
+re-testing the *actual delivered* Phase 3.1 build, still without
+changing Phase 3's scope: a response row missing `instrument_id` was
+silently given a fabricated fallback value instead of failing closed;
+the symbology identity-safety gate's own date-range math had an
+off-by-one that could leave a cross-day, intraday-end-time request
+under-protected against exactly the raw-symbol decade-reuse problem it
+exists to catch; a bar's `tick_size`/`provider`/`provider_raw_symbol`
+were never cross-checked against Olive's production-validated
+instrument or the provider actually servicing the request; and
+`write_bars` could legitimize previously-unverified or corrupt
+existing data by skipping the same manifest/checksum check `read_bars`
+already enforced. See `docs/historical_data.md` §17 for the full list,
+and the corrective ZIP's completion report for the complete
+accounting.
+
+The Phase 3.3 pass fixed further findings discovered by adversarially
+re-testing the *actual delivered* Phase 3.2 build, still without
+changing Phase 3's scope: a pre-existing identical duplicate in
+storage could cause `write_bars` to crash constructing its own result
+object *after* a successful commit; a misplaced partition (wrong
+calendar month) could pass every existing check and be silently
+filtered into an innocent-looking empty read result, even against a
+manifest forged to correctly claim the right directory; one partition
+could hold internally incoherent bars (mixed `tick_size`/
+`provider_raw_symbol`/`provider_instrument_id`); `read_bars` did not
+reject an orphan manifest or validate duplicate canonical keys the way
+`write_bars` already did; a manifest's own descriptive fields were
+never cross-checked against what was actually decoded from its
+partition; and Databento symbology instrument-ID resolution did not
+strictly validate value format/entry shape before a paid fetch. See
+`docs/historical_data.md` §18 for the full list, and the corrective
+ZIP's completion report for the complete accounting.
+
+The **Phase 3.3 QA compliance rework** is a correction to the Phase 3.3
+delivery and to the completion *process* itself -- still Phase 3.3, not
+a new phase. Independent review reproduced the Phase 3.3 baseline as
+genuinely strong, but found that completion had been declared without
+every standing QA boundary actually being exhaustively re-tested:
+manifest integer fields were not strict against Python's `True == 1`/
+`1.0 == 1` equality traps; `record_count == 0` was not rejected as the
+impossible state it is; malformed nested Databento symbology containers
+(e.g. `not_found=123`) leaked a raw `TypeError` instead of
+`ProviderSymbologyError`, because `value or []` only replaces falsy
+values, never type-checks; and `HistoricalReadResult`/
+`HistoricalWriteResult` still had one unconstrained impossible-state
+combination each. All four fixed, with 74 new regression tests (1142
+passed, 2 skipped total) and manual adversarial reproduction against
+the finished code. See `docs/historical_data.md` §19 for the full list
+and `CLAUDE.md`'s new completion-claim-rule lesson, and the corrective
+ZIP's completion report for the complete compliance-ledger accounting.
+
+The **Phase 3 final completion pass** is the consolidated close-out of
+Phase 3 -- still Phase 3, not a new phase. It fixed the last four
+confirmed gaps in the QA-rework build, each one level deeper than
+anything tested before: manifest `last_written_at_utc` was written but
+never validated on read; manifest `requested_start_utc`/
+`requested_end_utc` were each individually validated but never checked
+against each other; Databento `not_found`/`partial` were validated as
+containers but never member-by-member (so `not_found=[123]` passed
+silently); and the Databento `result` mapping was only ever validated
+at the requested symbol's own slice, letting a malformed sibling entry
+through. All four fixed, with 42 new regression tests (1184 passed, 2
+skipped total) and manual adversarial reproduction against the
+finished code. `d0`/`d1` symbology fields were deliberately left
+unvalidated -- nothing reads them, and the properties they would
+protect are already independently guaranteed elsewhere. See
+`docs/historical_data.md` §20 for the full list and `CLAUDE.md`'s
+member-level/sibling-entry validation lessons, and the final ZIP's
+completion report for the complete compliance-ledger accounting.
+
+Olive still has **no real-time data, no predictive models, no
+strategies, no signals, and no web interface.** Olive does not predict
+NQ yet; it understands the instruments it will eventually trade
+(Phase 2) and can now build a historical record of their prices
+(Phase 3).
+
+Phase 2 (below) is preserved as originally written.
+
+### Phase 2 status (preserved)
+
 **Phase 2.5 — Final Public Validator Hardening** (following a fifth
-external code review of Phase 2; intended as the final Phase 2
-hardening pass).
+external code review of Phase 2; the final Phase 2 hardening pass).
 
 Olive AI now knows what NQ and MNQ actually are -- contract economics,
 quarterly contract identity, the expiration/roll calendar, and the
@@ -197,12 +314,158 @@ production-domain validation), including adversarial regression tests
 for every Phase 2.1, Phase 2.2, Phase 2.3, Phase 2.4, and Phase 2.5
 finding.
 
+Historical market data (Phase 3) -- see `docs/historical_data.md` for
+full detail:
+
+- A provider-independent historical-data interface with a safe default
+  (`UnconfiguredHistoricalProvider`, used whenever no provider is
+  configured) and a real Databento adapter (`DatabentoHistoricalProvider`)
+  that only ever requests exact contracts via `stype_in="raw_symbol"`
+  -- never Databento's parent (`NQ.FUT`) or continuous (`NQ.c.0`)
+  symbology -- for `ohlcv-1s`/`1m`/`1h`/`1d` schemas only
+- Typed, self-validating `HistoricalBarRequest`/`HistoricalBar` domain
+  objects storing prices as exact integer tick counts (never
+  float/bare Decimal), with a `data_label` that can only ever be
+  `HISTORICAL` in this build
+- An explicit `HistoricalFetchStatus` for every outcome (success,
+  empty, not configured, each specific rejection, failure) -- never
+  `None`/an empty list/an exception alone
+- `HistoricalDataService`, which gates every fetch through Olive's
+  production tradable-domain check (before any provider call),
+  request validation, provider configuration, an explicit network
+  opt-in, and a `Decimal`-compared cost limit -- in that order
+- A deterministic, atomic, idempotent local Parquet storage layer
+  (`HistoricalBarStore`) with a per-partition provenance manifest
+  (including a SHA-256 checksum) and no secrets ever written to disk
+- A real `Historical market data` health check that never calls any
+  provider network method, reporting `NOT_CONFIGURED` (the honest
+  default), `CONFIGURED`, or `ERROR` for broken configuration
+
+Phase 3.1 correction (following independent review of the delivered
+Phase 3 build) -- see `docs/historical_data.md` §16 for full detail:
+
+- `Settings` now validates and canonicalizes its own Phase 3 fields in
+  `__post_init__` -- previously `Settings(historical_network_enabled="false")`
+  (a truthy string) could silently bypass the network kill switch when
+  constructed directly rather than through `load_settings()`; a
+  relative `historical_data_dir` now resolves against Olive's project
+  root rather than the process's current working directory
+- The Databento adapter never echoes a vendor exception's own message
+  text into anything it raises (Databento's documented invalid-auth
+  error can itself contain the API key) -- only fixed, generic,
+  per-category messages, with the exception chain severed
+- A new symbology-resolution identity-safety gate runs before any paid
+  fetch, protecting against Databento's documented raw-symbol reuse
+  across years (`NQZ6` means a different contract in 2016/2026/2036)
+- Provider volume is converted with a safe integral check that rejects
+  a fractional value instead of silently truncating it; a provider
+  row's own data-quality failures and a provider's malformed
+  `estimate_cost`/`fetch_bars` return values now fail closed as
+  structured errors rather than leaking or being mistaken for success
+- `HistoricalBarStore.write_bars`'s Parquet+manifest write is now
+  transactional (single-partition and cross-partition rollback on
+  failure); `read_bars` now verifies the manifest's identity and a
+  freshly-recomputed checksum before trusting any partition, and
+  rejects an unsupported schema version or silently-coerced
+  bool/float/string contract year/month
+- `HistoricalDataService`/`build_historical_provider` constructors now
+  validate every argument with Olive's own error type, never a raw
+  `TypeError` or a deferred `AttributeError`
+- Corrected ZIP packaging: this archive's contents sit directly at the
+  archive root, matching the Phase 2.5 convention (the delivered
+  `olive-phase3.zip` had mistakenly nested everything under an
+  `olive-ai/` prefix)
+
+Phase 3.2 correction (following a further independent review of the
+*actually delivered* Phase 3.1 build) -- see `docs/historical_data.md`
+§17 for full detail:
+
+- A Databento response row missing `instrument_id` now fails closed
+  (`ProviderResponseIdentityError`) instead of silently having its
+  provenance fabricated from the symbology-resolved expected value
+- The symbology identity-safety gate's date-range math now correctly
+  covers every instant of a cross-day request with an intraday end
+  time (e.g. ending `...T00:30Z`) -- the previous projection could
+  leave such a request's symbology check covering none of the day it
+  actually needed to protect
+- `normalize_and_validate_bars` now cross-checks every bar's
+  `tick_size` against Olive's production-validated instrument and its
+  `provider`/`provider_raw_symbol` against the provider actually
+  servicing the request -- a bar can be internally self-consistent
+  while still being production-wrong, and is now never stored on that
+  basis alone
+- `write_bars` now verifies an existing partition's manifest/checksum
+  before merging onto it (previously only `read_bars` did), and
+  rejects existing stored data that already contains conflicting
+  duplicates, rather than silently legitimizing either
+- `HistoricalWriteResult`/`HistoricalReadResult` are now
+  self-validating (non-negative counts, `new_records <= total_records`,
+  `bars` normalized to real `HistoricalBar` instances); a rollback
+  failure during either single- or cross-partition recovery is no
+  longer silently swallowed; `HistoricalBar.conflicts_with` validates
+  its argument; the Databento adapter's injected-client seam is
+  validated at construction; `HistoricalBarStore`'s root is resolved
+  CWD-independently even on direct construction; `HistoricalDataService`
+  validates `write_bars`'s own return type and translates an expected
+  storage `OSError` into a structured `FAILED` result
+- Permanent shipped regression coverage
+  (`tests/test_historical_data_storage_transaction.py`) for every
+  storage-transaction behavior that previously existed only in an
+  unshipped scratch-space harness
+
+Phase 3.3 correction (following a further independent review of the
+*actually delivered* Phase 3.2 build) -- see `docs/historical_data.md`
+§18 for full detail:
+
+- A pre-existing partition holding two identical copies of a bar now
+  canonicalizes to one record *before* `write_bars` computes any
+  quantity that feeds `HistoricalWriteResult`'s construction, making a
+  post-commit construction failure structurally impossible rather than
+  merely less likely
+- `read_bars` now enforces the same canonical-duplicate policy
+  `write_bars` already did (identical collapses to one; conflicting
+  raises), including as defense in depth on its final cross-partition
+  result, and now rejects an orphan manifest (manifest present,
+  parquet missing) the same way the reverse orphan direction already
+  was
+- A partition's `year=YYYY/month=MM` directory identity is now
+  verified two independent ways: the manifest's own new
+  `partition_year`/`partition_month` fields against the directory, and
+  every individual loaded bar's own `ts_event` against that same
+  directory -- the second layer catches a misplaced partition even if
+  its manifest is forged to correctly claim the right directory
+- One partition must now stay internally coherent on `tick_size`/
+  `provider_raw_symbol`/`provider_instrument_id`/`data_label`/
+  `schema_version` -- enforced on every write and every read, not just
+  implied by the write-side grouping key
+- A manifest's own descriptive fields (`record_count`, first/last
+  timestamp, `provider_raw_symbol`, `tick_size`, ...) are now
+  cross-checked against what was actually decoded from its partition,
+  not only its raw-bytes checksum
+- Databento symbology instrument-ID resolution now strictly validates
+  both each mapping entry's shape and the resolved value's format
+  (a real, non-empty, ASCII-digit, strictly-positive string) before
+  any paid fetch
+- `HistoricalBar`'s tick-count/volume fields now enforce
+  `ARROW_INT64_MAX = 2**63 - 1`, the exact signed-64-bit bound Olive's
+  own Parquet schema declares for those columns; `_bars_to_table`'s
+  actual Arrow conversion calls now translate an expected failure into
+  `HistoricalStorageError`, narrowly scoped so a genuine Olive bug in
+  the attribute-gathering loop above them still propagates unmodified
+- A new, entirely offline real-`databento`-package compatibility test
+  introspects the installed package's documented interface without
+  ever making a network call, so installing the real package proves
+  this adapter's assumed interface still holds
+- Permanent shipped regression coverage for every issue above, added
+  to `tests/test_historical_data_storage_transaction.py` (now 53
+  tests, up from 26)
+
 ## Not Yet Implemented
 
 The following are intentionally **not** part of Olive AI yet and will be
 added in later phases:
 
-- Historical and real-time market data (prices, quotes, bars)
+- Real-time market data (prices, quotes, bars)
 - Feature engine (technical, order-flow, session, cross-market)
 - Strategy framework
 - Machine-learning prediction engine
@@ -260,11 +523,21 @@ pytest
 ## Security
 
 - `.env` and other local secret files are excluded via `.gitignore`.
-- `.env.example` contains only safe placeholder values.
+- `.env.example` contains only safe placeholder values (`DATABENTO_API_KEY=`
+  is blank).
 - No API keys, credentials, or secrets are ever written to source
-  files, tests, logs, or documentation.
-- Olive AI makes no network calls of any kind through Phase 2 -- the
-  futures domain reads only local, version-controlled JSON configuration.
+  files, tests, logs, documentation, manifests, or Olive-generated
+  error messages.
+- Through Phase 2, Olive makes no network calls of any kind -- the
+  futures domain reads only local, version-controlled JSON
+  configuration.
+- As of Phase 3, Olive can make a real network call to Databento, but
+  only via `HistoricalDataService.fetch_and_store`, and only once every
+  safety gate in `docs/historical_data.md` §9 has passed (provider
+  configured with a real key, network explicitly enabled, a valid
+  NQ/MNQ request, and a passing cost check). Importing any module,
+  loading settings, running the test suite, running `main.py`, or
+  computing system health never performs network I/O or incurs cost.
 
 ## Development Roadmap
 
@@ -272,7 +545,8 @@ Olive AI is built in 14 sequential phases (Foundation, Futures Domain,
 Historical Data, Real-Time Data, Market Intelligence, Strategies,
 Prediction Engine, Fusion/Signal Engine, Backtesting, Paper Trading,
 Olive Web, Advanced Intelligence, Always-On Operation, and Production
-Validation). Each phase is implemented, tested, and committed before
-the next begins. See `docs/architecture.md` for architecture details
-and `docs/futures_domain.md` for the full Phase 2 futures-domain
+Validation). Each phase is implemented and tested before the next
+begins. See `docs/architecture.md` for architecture details,
+`docs/futures_domain.md` for the full Phase 2 futures-domain write-up,
+and `docs/historical_data.md` for the full Phase 3 historical-data
 write-up.

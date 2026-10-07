@@ -1,2 +1,40 @@
 pytest>=7.4,<9
 python-dotenv>=1.0,<2
+
+# Phase 3/3.1/3.2: historical market data
+#
+# Verification status (see docs/historical_data.md "Known limitations"
+# and the Phase 3.2 completion report's "Dependency Range Update"
+# section for the full honest account):
+#
+# - pandas: this range HAS been exercised for real in this build's own
+#   sandbox (the installed version was 3.0.2) -- every
+#   tests/test_historical_data_databento.py test constructs and reads
+#   real pandas DataFrames. The lower bound (2.x) is NOT verified here
+#   and is a documentation-based estimate only.
+# - databento, pyarrow: neither package could be INSTALLED in this
+#   build's sandbox (no PyPI access), so neither range below has been
+#   exercised by actually running the test suite against the real
+#   package. Phase 3.1's ranges (databento>=0.40,<1; pyarrow>=14,<19)
+#   were unnecessarily wide -- independent review correctly pointed
+#   out they would block installing the packages' own current stable
+#   releases. Phase 3.2 confirmed, via a web lookup of each package's
+#   PyPI project page (not an install -- no PyPI network access exists
+#   in this sandbox), that the current stable releases as of this
+#   correction are databento 0.87.0 and pyarrow 25.0.1. The ranges
+#   below deliberately target that API line narrowly (a single minor
+#   version for databento, matching this adapter's documented
+#   `Historical(key=...)` / `metadata.get_cost` / `symbology.resolve` /
+#   `timeseries.get_range` / `DBNStore.to_df` surface; a single major
+#   version for pyarrow) rather than the previous wide, unverified
+#   span. This is still NOT a tested guarantee -- it only narrows what
+#   needs verifying. The authoritative verification happens once these
+#   are actually installed into a real Python 3.11 environment (the
+#   user's own machine) and both
+#   tests/test_historical_data_databento.py (interface-assumption
+#   verification against the real installed `databento` package) and
+#   tests/test_historical_data_storage.py (expected to report 0
+#   skipped, not 1, once `pyarrow` installs for real) are run there.
+databento>=0.87,<0.88
+pyarrow>=25,<26
+pandas>=2,<4

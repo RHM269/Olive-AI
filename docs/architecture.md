@@ -464,3 +464,246 @@ initiated in Phase 2.1 and extended through Phase 2.4 now covers every
 public function in the package, including the production-validation
 layer added last. No further Phase 2 corrective work is anticipated
 pending the next external review.
+
+## Scope of Phase 3 (historical market data)
+
+Phase 3 adds Olive's first market-data subsystem: the ability to
+fetch, validate, and durably store historical OHLCV bars for Olive's
+exact NQ/MNQ production universe from a configured provider, on
+explicit request only. See `docs/historical_data.md` for the full
+write-up (domain model, safety gates, storage layout, Databento
+adapter, and this build's known limitations); this section covers how
+it fits into Olive's overall architecture.
+
+### Module Map (Phase 3 additions)
+
+```
+app/
+├── data/
+│   ├── __init__.py        Package marker only. No side effects on import.
+│   ├── models.py           HistoricalDataError hierarchy, HistoricalTimeframe,
+│   │                       DataLabel, HistoricalBarRequest, HistoricalBar,
+│   │                       HistoricalFetchStatus/HistoricalFetchResult
+│   ├── validation.py       require_olive_tradable_contract (delegates to
+│   │                       app.futures.validation), normalize_and_validate_bars
+│   ├── provider_base.py    HistoricalMarketDataProvider (ABC), CostEstimate
+│   ├── storage.py          HistoricalBarStore (local Parquet, atomic, idempotent)
+│   ├── service.py          HistoricalDataService (the gate pipeline)
+│   └── providers/
+│       ├── __init__.py
+│       ├── unconfigured.py   UnconfiguredHistoricalProvider (safe default)
+│       ├── databento.py      DatabentoHistoricalProvider (the only module that
+│       │                     knows Databento's API shape)
+│       └── factory.py        build_historical_provider(settings)
+└── health.py (changed)      _check_historical_data() -- real check, replacing
+                              the former NOT_IMPLEMENTED placeholder
+
+data/historical/             Local Parquet store root (git-ignored; .gitkeep only)
+```
+
+### Component Relationship (Phase 3)
+
+```
+app.config.Settings (historical_* fields)
+            |
+            v
+app.data.providers.factory.build_historical_provider()  (never performs I/O)
+            |
+            v
+   HistoricalMarketDataProvider  <--  UnconfiguredHistoricalProvider (default)
+            |                    <--  DatabentoHistoricalProvider
+            v
+app.data.service.HistoricalDataService.fetch_and_store(request)
+            |
+            |-- 1. request validation (app.data.models)
+            |-- 2. Olive production tradable-domain gate
+            |        (app.data.validation -> app.futures.validation, reused)
+            |-- 3. provider configuration gate
+            |-- 4. network opt-in gate
+            |-- 5/6. cost estimation + limit gate (provider.estimate_cost)
+            |-- 7. provider fetch (provider.fetch_bars)
+            |-- 8. cross-bar validation (app.data.validation)
+            |-- 9. storage (app.data.storage.HistoricalBarStore)
+            v
+   HistoricalFetchResult (HistoricalFetchStatus + bars + cost + message)
+```
+
+`app.health._check_historical_data()` sits beside this pipeline, not
+inside it: it calls the same provider factory to determine
+`NOT_CONFIGURED`/`CONFIGURED`/`ERROR`, but never calls
+`estimate_cost`/`fetch_bars` on the resulting provider, so checking
+system health never performs network I/O or incurs cost.
+
+### Architectural Boundaries (Phase 3 additions)
+
+- **Separate error hierarchy, deliberately composed, never confused:**
+  `app.data.models.HistoricalDataError` is a new root, distinct from
+  `app.futures.models.FuturesDomainError`. A futures-domain failure
+  encountered at this package's boundary is translated into a
+  `HistoricalDataError` subclass, never left to leak through as the
+  other hierarchy's type (see `docs/historical_data.md` §6 for a defect
+  this exact boundary produced, and fixed, during Phase 3 itself).
+- **No canonical NQ/MNQ fact is duplicated outside Phase 2:**
+  `app.data.validation.require_olive_tradable_contract` delegates
+  entirely to `app.futures.validation`'s existing canonical specs.
+- **Vendor knowledge stays in one adapter module:** only
+  `app.data.providers.databento` knows Databento's API shape (schema
+  names, DataFrame layout, exception hierarchy). Every other module in
+  `app.data` works only with Olive's own domain objects.
+- **No automatic network access:** importing any module in `app.data`,
+  loading settings, building a provider via the factory, running the
+  test suite, running `main.py`, or computing system health never
+  performs network I/O. Only `HistoricalDataService.fetch_and_store`
+  can reach a real provider call, and only once every gate in its
+  pipeline (§ above) has passed.
+- **Fail closed, never fabricate:** a provider failure, a cost-
+  estimation failure, or a storage conflict is reported as a distinct
+  status/exception, never silently converted into an empty or
+  partial success.
+
+With Phase 3 delivered as described here and in
+`docs/historical_data.md`, Olive has its first subsystem capable of
+building a real local historical dataset for NQ/MNQ -- strictly
+on-demand, safety-gated, and fully offline-testable -- while
+`Real-time market data` and every later-phase subsystem remain
+honestly `NOT_IMPLEMENTED`.
+
+## Scope of Phase 3.1 (historical data safety & integrity correction)
+
+An independent review of the actual delivered Phase 3 ZIP (not merely
+its source as summarized above) found several substantive safety/
+data-integrity issues -- see `docs/historical_data.md` §16 for the
+full, itemized list and the completion report for the complete
+accounting. Like Phase 2.1-2.3, Phase 3.1 adds **no new architectural
+layer or module boundary** -- every fix lands inside the existing
+Phase 3 module map (`app/config.py`, `app/data/models.py`,
+`app/data/service.py`, `app/data/providers/databento.py`,
+`app/data/providers/factory.py`, `app/data/validation.py`,
+`app/data/storage.py`) -- with one partial exception: `Settings`
+(`app/config.py`, a Phase 1 module) gains its own `__post_init__`
+self-validation for the first time, extending to it the same
+"every domain object validates itself regardless of construction
+path" discipline every `app.data`/`app.futures` object already
+follows, closing the one place in the codebase that had never needed
+it until Phase 3 added fields a caller could construct unsafely.
+
+No Phase 3 module boundary, public interface shape, or storage layout
+changed in a way that breaks compatibility with anything built against
+Phase 3's documented contracts -- every fix narrows what is accepted
+(fails closed on a case that previously succeeded unsafely) or adds a
+check that was previously skipped (manifest verification on read,
+provider-return-type validation), never removes or loosens an existing
+guarantee.
+
+## Scope of Phase 3.2 (final historical integrity correction)
+
+A further independent review, of the actual delivered
+`olive-phase3.1.zip` (not the source tree in the abstract), found
+additional adversarially-discovered gaps -- see
+`docs/historical_data.md` §17 for the full, itemized list. Like
+Phase 3.1, Phase 3.2 adds **no new architectural layer or module
+boundary** -- every fix again lands inside the existing Phase 3 module
+map (`app/data/models.py`, `app/data/service.py`,
+`app/data/providers/databento.py`, `app/data/storage.py`,
+`app/data/validation.py`), plus one new shipped test module
+(`tests/test_historical_data_storage_transaction.py`, backed by a new
+`tests/_fake_pyarrow.py` fixture) that converts coverage which
+previously existed only in an unshipped scratch-space harness into
+permanent regression tests. `app/data/validation.py`'s
+`normalize_and_validate_bars` gains two new optional keyword
+parameters (`instrument`, `expected_provider_name`) rather than a new
+function, since the check it performs -- "is this bar correct for the
+production instrument/provider actually involved" -- is the same
+cross-bar/cross-request validation question that function already
+answers, extended by two more cross-checks.
+
+No Phase 3 module boundary, public interface shape, or storage layout
+changed in a way that breaks compatibility with anything built against
+Phase 3's documented contracts here either -- every Phase 3.2 fix
+again either narrows what is accepted (fails closed on a case that
+previously succeeded unsafely: a missing `instrument_id`, an
+under-covered symbology date range, a production-wrong bar, an
+unverified existing partition) or adds a check that was previously
+skipped (manifest verification before a write-side merge,
+result-object self-validation, rollback-failure surfacing), never
+removes or loosens an existing guarantee.
+
+## Scope of Phase 3.3 (canonical historical storage finalization)
+
+A third independent review, of the actual delivered
+`olive-phase3.2.zip`, found further adversarially-discovered
+canonical-storage integrity gaps -- see `docs/historical_data.md` §18
+for the full, itemized list. Like Phase 3.1/3.2, Phase 3.3 adds **no
+new architectural layer or module boundary** -- every fix again lands
+inside the existing Phase 3 module map (`app/data/models.py`,
+`app/data/storage.py`, `app/data/providers/databento.py`), plus one
+new shipped, entirely offline real-`databento`-package compatibility
+test module (`tests/test_historical_data_databento_real_api.py`,
+`pytest.importorskip("databento")`) and substantial new permanent
+regression coverage added to the existing
+`tests/test_historical_data_storage_transaction.py`. The manifest
+format gains two new keys (`partition_year`, `partition_month`) --
+additive only, with no migration compatibility required, since there
+is no committed/released production dataset predating this build.
+
+No Phase 3 module boundary, public interface shape, or storage layout
+changed in a way that breaks compatibility with anything built against
+Phase 3's documented contracts here either -- every Phase 3.3 fix
+again either narrows what is accepted (fails closed on a case that
+previously succeeded unsafely: a pre-existing duplicate's raw count
+feeding a result object, a misplaced-month partition, an internally
+incoherent partition, a malformed symbology instrument ID, an
+out-of-range tick/volume count) or adds a check that was previously
+skipped (manifest-content-vs-decoded-bars verification, partition
+coherence enforcement, orphan-manifest rejection on read), never
+removes or loosens an existing guarantee.
+
+## Scope of the Phase 3.3 QA compliance rework (process correction, still Phase 3.3)
+
+A fourth independent review, of the actual delivered
+`olive-phase3.3.zip`, found that the Phase 3.3 completion process had
+declared every requirement satisfied without every standing QA
+boundary having been exhaustively, adversarially re-tested -- see
+`docs/historical_data.md` §19 for the full, itemized list. This is a
+correction to the Phase 3.3 delivery and to the completion process,
+**not Phase 3.4 and not Phase 4** -- no new architectural layer or
+module boundary is added. Every fix again lands inside the existing
+Phase 3 module map (`app/data/storage.py`,
+`app/data/providers/databento.py`), and the manifest format gains no
+new keys -- every existing key is now validated more strictly, never
+renamed or restructured. No Phase 3 module boundary, public interface
+shape, or storage layout changed in a way that breaks compatibility
+with anything built against Phase 3's documented contracts: every fix
+narrows what is accepted (a manifest integer field that is a `bool` or
+whole-number `float` masquerading as the right value, a `record_count`
+of zero, a malformed nested Databento symbology container, an
+impossible `HistoricalReadResult`/`HistoricalWriteResult` combination)
+or adds a check that was previously missing, never removes or loosens
+an existing guarantee.
+
+## Scope of the Phase 3 final completion pass (consolidated close-out, still Phase 3)
+
+A fifth independent review, of the actual delivered Phase 3.3 QA-rework
+ZIP, found four remaining gaps one level deeper than anything
+previously tested -- see `docs/historical_data.md` §20 for the full,
+itemized list. This is the consolidated final correction and
+verification pass for Phase 3, **not Phase 3.4 and not Phase 4** -- no
+new architectural layer, module, or call site is added. Every fix
+again lands inside the existing Phase 3 module map
+(`app/data/storage.py`, `app/data/providers/databento.py`); the
+manifest format gains no new keys (the already-written
+`last_written_at_utc`/`requested_start_utc`/`requested_end_utc` keys
+are now validated more strictly, not restructured), and the Databento
+adapter gains no new call sites (its existing symbology-response
+handling is now validated member-by-member and across sibling entries,
+not re-architected). No Phase 3 module boundary, public interface
+shape, or storage layout changed in a way that breaks compatibility
+with anything built against Phase 3's documented contracts: every fix
+narrows what is accepted, never removes or loosens an existing
+guarantee. `d0`/`d1` symbology fields were deliberately left
+unvalidated after tracing that no code path reads them and that the
+properties they would otherwise protect are already independently
+guaranteed by existing checks -- a documented decision, not an
+oversight. With this pass complete, Phase 3 is considered final and
+consolidated; see the `olive-phase3-final.zip` completion report for
+the full compliance ledger.

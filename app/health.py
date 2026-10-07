@@ -77,9 +77,10 @@ class SystemHealth:
 # Components not yet implemented, with the phase that will build them.
 # Kept as simple (name, phase) pairs rather than scattering magic
 # strings through get_system_health(). "Futures domain" is handled
-# separately below via a real check now that Phase 2 implements it.
+# separately below via a real check now that Phase 2 implements it;
+# "Historical market data" is handled separately below via a real
+# check now that Phase 3 implements it.
 _NOT_YET_IMPLEMENTED: tuple[tuple[str, str], ...] = (
-    ("Historical market data", "Phase 3"),
     ("Real-time market data", "Phase 4"),
     ("Feature engine", "Phase 5"),
     ("Strategy engine", "Phase 6"),
@@ -146,14 +147,78 @@ def _check_futures_domain() -> ComponentHealth:
     )
 
 
+def _check_historical_data(settings: Settings) -> ComponentHealth:
+    """Real health check for historical market data (Phase 3).
+
+    Reports ``NOT_CONFIGURED`` when no provider is selected, or a
+    provider is selected but missing required configuration (no API
+    key, or the vendor package is not installed) --
+    :func:`~app.data.providers.factory.build_historical_provider`
+    already names the exact reason in that case. Reports
+    ``CONFIGURED`` only once a real provider was actually constructed
+    (provider selected, API key present, vendor package importable).
+    Reports ``ERROR`` for configuration that is present but broken
+    (e.g. an API key that is only whitespace, which
+    ``DatabentoHistoricalProvider`` itself rejects as empty) -- never
+    silently falls back to ``NOT_CONFIGURED`` for a case that is
+    actually a misconfiguration, and never crashes the whole health
+    report over it.
+
+    This function -- and everything it calls -- never performs
+    network I/O. It never calls ``estimate_cost`` or ``fetch_bars`` on
+    any provider, and ``build_historical_provider`` itself only
+    constructs a provider object; it never performs a fetch (see that
+    module's own docstring). Verified in
+    ``tests/test_historical_data_health.py`` via a provider/client
+    whose network methods raise if ever called, proving this check
+    never touches them.
+    """
+    from app.data.models import HistoricalDataError
+    from app.data.providers.factory import build_historical_provider
+    from app.data.providers.unconfigured import UnconfiguredHistoricalProvider
+
+    try:
+        provider = build_historical_provider(settings)
+    except HistoricalDataError as exc:
+        return ComponentHealth(
+            name="Historical market data",
+            state=HealthState.ERROR,
+            detail=f"Historical data provider configuration is broken: {exc}",
+        )
+
+    if isinstance(provider, UnconfiguredHistoricalProvider):
+        return ComponentHealth(
+            name="Historical market data",
+            state=HealthState.NOT_CONFIGURED,
+            detail=provider.reason,
+        )
+
+    network_note = (
+        "network fetches enabled"
+        if settings.historical_network_enabled
+        else "network fetches disabled (OLIVE_HISTORICAL_NETWORK_ENABLED=false)"
+    )
+    dataset = getattr(provider, "dataset", "n/a")
+    return ComponentHealth(
+        name="Historical market data",
+        state=HealthState.CONFIGURED,
+        detail=(
+            f"provider={provider.name}, dataset={dataset}, {network_note}, "
+            f"max_request_cost_usd={settings.historical_max_request_cost_usd}, "
+            f"data_dir={settings.historical_data_dir}."
+        ),
+    )
+
+
 def get_system_health(settings: Settings) -> SystemHealth:
     """Build Olive's current, truthful system health snapshot.
 
-    ``System``, ``Configuration``, and (as of Phase 2) ``Futures
-    domain`` are reported as real, verified state. Every subsystem
-    still unimplemented (market data, features, strategies,
-    predictions, signals, backtesting, paper trading, alerts, web) is
-    honestly reported as ``NOT_IMPLEMENTED``.
+    ``System``, ``Configuration``, (as of Phase 2) ``Futures domain``,
+    and (as of Phase 3) ``Historical market data`` are reported as
+    real, verified state. Every subsystem still unimplemented
+    (real-time market data, features, strategies, predictions,
+    signals, backtesting, paper trading, alerts, web) is honestly
+    reported as ``NOT_IMPLEMENTED``.
     """
     components: list[ComponentHealth] = [
         ComponentHealth(
@@ -170,6 +235,7 @@ def get_system_health(settings: Settings) -> SystemHealth:
             ),
         ),
         _check_futures_domain(),
+        _check_historical_data(settings),
     ]
 
     for name, phase in _NOT_YET_IMPLEMENTED:
