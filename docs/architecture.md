@@ -1,11 +1,12 @@
-# Olive AI — Architecture (through Phase 2)
+# Olive AI — Architecture (through Phase 4)
 
 This document describes Olive AI's architecture as it exists through
-**Phase 2 — Futures Domain & Contract Lifecycle**. The Phase 1 section
-below is preserved as originally written; a new Phase 2 section follows
-it rather than rewriting that history. It intentionally does not
-describe future phases' internals; see the project's phase plan for
-what comes next.
+**Phase 4 — Real-Time Market Data**. Each phase's section below is
+preserved as originally written at the time that phase (and its
+corrective passes) shipped; a new section is appended for each
+subsequent phase rather than rewriting that history. It intentionally
+does not describe future phases' internals; see the project's phase
+plan for what comes next.
 
 ## Scope of Phase 1
 
@@ -707,3 +708,159 @@ guaranteed by existing checks -- a documented decision, not an
 oversight. With this pass complete, Phase 3 is considered final and
 consolidated; see the `olive-phase3-final.zip` completion report for
 the full compliance ledger.
+
+## Scope of Phase 4 (real-time market data)
+
+Phase 4 adds Olive's second market-data subsystem: the ability to open
+a live streaming connection to a configured provider for Olive's exact
+NQ/MNQ production universe, normalize vendor-specific trade/quote/bar
+records into Olive's own domain events, and report connection/
+liveness state honestly -- all strictly opt-in, and with no network
+access of any kind unless explicitly enabled. See
+`docs/realtime_data.md` for the full write-up (domain model, safety
+gates, Databento live adapter, reconnect/staleness behavior, and this
+build's known limitations); this section covers how it fits into
+Olive's overall architecture.
+
+Phase 4 is deliberately a *sibling* to Phase 3, not an extension of
+it: live events are never persisted, never written to the historical
+Parquet store, and never treated as a substitute for a historical bar.
+The two subsystems share only what is genuinely shared already --
+Olive's futures domain (`app.futures.*`) and the `DATABENTO_API_KEY`
+credential -- and nothing else.
+
+### Module Map (Phase 4 additions)
+
+```
+app/
+├── data/
+│   ├── live_models.py       LiveDataError hierarchy (separate root from
+│   │                        HistoricalDataError), ConnectionState,
+│   │                        LiveEventType, LiveSubscriptionRequest,
+│   │                        LiveTrade/LiveQuote/LiveBar, LiveStreamStatus
+│   ├── live_provider_base.py  RealTimeMarketDataProvider (ABC)
+│   ├── live_service.py        RealTimeDataService (the gate pipeline +
+│   │                           session-aware staleness disambiguation)
+│   └── providers/
+│       ├── unconfigured_live.py  UnconfiguredLiveProvider (safe default)
+│       ├── databento_live.py     DatabentoLiveProvider (the only module
+│       │                         that knows Databento's live API shape)
+│       └── live_factory.py       build_live_provider(settings)
+└── health.py (changed)        _check_realtime_data() -- real check,
+                                replacing the former NOT_IMPLEMENTED
+                                placeholder, wired in beside (never
+                                inside) _check_historical_data()
+```
+
+No file under `app/data/` from Phase 3 was renamed, restructured, or
+had its public contract changed -- Phase 4 adds new sibling modules
+beside the Phase 3 ones (`live_models.py` beside `models.py`,
+`live_service.py` beside `service.py`, `databento_live.py` beside
+`databento.py`, etc.) rather than growing the Phase 3 modules to cover
+both historical and live concerns.
+
+### Component Relationship (Phase 4)
+
+```
+app.config.Settings (live_* fields; DATABENTO_API_KEY reused from Phase 3)
+            |
+            v
+app.data.providers.live_factory.build_live_provider()  (never performs I/O)
+            |
+            v
+   RealTimeMarketDataProvider  <--  UnconfiguredLiveProvider (default)
+            |                  <--  DatabentoLiveProvider
+            v
+app.data.live_service.RealTimeDataService.open_stream(subscription)
+            |
+            |-- 1. subscription validation (app.data.live_models)
+            |-- 2. Olive whole-domain production gate
+            |        (validate_olive_futures_domain, reused from Phase 2.4)
+            |-- 3. per-contract production-tradability gate
+            |        (require_olive_tradable_contract, reused from Phase 3)
+            |-- 4. provider configuration gate
+            |-- 5. network opt-in gate (OLIVE_LIVE_NETWORK_ENABLED)
+            |-- 6. provider.connect(subscription, instruments)
+            v
+   connected RealTimeMarketDataProvider
+            |
+            |-- .events()  -->  LiveTrade / LiveQuote / LiveBar (DataLabel.LIVE)
+            |-- .status    -->  LiveStreamStatus (counts, is_stale)
+            |-- .close()   -->  idempotent disconnect
+            v
+RealTimeDataService.is_feed_unexpectedly_stale()
+            |
+            v  (reuses app.futures.sessions.session_state_at)
+   session-aware staleness verdict (never "stale" during a
+   legitimately closed/maintenance session)
+```
+
+`app.health._check_realtime_data()` sits beside this pipeline, not
+inside it, exactly mirroring `_check_historical_data()`: it calls the
+same provider factory to determine
+`NOT_CONFIGURED`/`CONFIGURED`/`ERROR`, but never calls
+`connect()`/`events()` on the resulting provider, so checking system
+health never opens a live connection -- verified directly by a
+dedicated test that gives the health check a fake client whose
+connection-relevant methods raise `AssertionError` if ever touched.
+`main.py` is unchanged -- it already called `get_system_health()`,
+which now happens to include a real real-time-data check.
+
+### Architectural Boundaries (Phase 4 additions)
+
+- **Separate error hierarchy, deliberately composed, never confused:**
+  `app.data.live_models.LiveDataError` is its own root -- a sibling to
+  `app.data.models.HistoricalDataError`, not a subclass of it and not
+  reusing it. A futures-domain failure encountered at this package's
+  boundary is translated into a `LiveDataError` subclass, the same
+  discipline Phase 3 established for `HistoricalDataError`.
+- **No canonical NQ/MNQ fact is duplicated outside Phase 2, and no
+  tradability rule is duplicated outside Phase 3:**
+  `RealTimeDataService.open_stream` reuses
+  `app.futures.validation.validate_olive_futures_domain` and
+  `app.data.validation.require_olive_tradable_contract` directly,
+  rather than re-implementing or re-approximating either check for the
+  live path.
+- **Vendor knowledge stays in one adapter module:** only
+  `app.data.providers.databento_live` knows Databento's live API shape
+  (the `Live` client, its record types, its fixed-point price
+  encoding, its symbology/error-code conventions). Every other module
+  in `app.data`'s live path works only with Olive's own domain
+  objects, via duck-typed record classification rather than
+  `isinstance` checks against the vendor's own classes -- a
+  deliberate choice that lets the exact same code path be exercised
+  by tests without the real `databento` package installed, and
+  behave identically whether or not it happens to be.
+- **No automatic network access:** importing any live-path module,
+  loading settings, building a live provider via the factory, running
+  the test suite, running `main.py`, or computing system health never
+  opens a live connection. Only `RealTimeDataService.open_stream` can
+  reach a real provider's `connect()`, and only once every gate in its
+  pipeline (§ above) has passed -- including a network kill switch
+  (`OLIVE_LIVE_NETWORK_ENABLED`) that is deliberately independent of
+  Phase 3's `OLIVE_HISTORICAL_NETWORK_ENABLED`: enabling one never
+  enables the other.
+- **Fail closed, never fabricate:** an unmapped or contradictorily
+  remapped instrument, a tick-misaligned price, a malformed record, or
+  a permanent connection failure is reported as a rejection or a raised
+  error, never silently dropped or converted into fabricated LIVE
+  data. Every live event constructed by the adapter is independently
+  validated as `DataLabel.LIVE` in its own `__post_init__`, regardless
+  of which code path constructed it.
+- **A closed-by-request stream is never reported as "stale":**
+  `LiveStreamStatus.is_stale` is computed only while the connection is
+  actually `CONNECTED`; a deliberately closed (`STOPPED`) or never-
+  connected stream is a different, honestly distinguished state.
+- **Staleness is session-aware, not just a clock comparison:**
+  `RealTimeDataService.is_feed_unexpectedly_stale()` reuses
+  `app.futures.sessions.session_state_at` so a legitimately closed
+  weekend or maintenance window is never misreported as an
+  unexpectedly stale feed.
+
+With Phase 4 delivered as described here and in
+`docs/realtime_data.md`, Olive has its first subsystem capable of
+observing live NQ/MNQ market activity -- strictly opt-in, safety-
+gated, and fully offline-testable against duck-typed fakes -- while
+every later-phase subsystem (feature engineering, strategies,
+prediction, signals, backtesting, paper trading, alerting, and the web
+layer) remains honestly `NOT_IMPLEMENTED`.

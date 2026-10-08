@@ -74,11 +74,11 @@ def test_databento_selected_without_key_reports_not_configured():
 
 
 def test_databento_selected_with_key_but_package_missing_reports_not_configured(monkeypatch):
-    # Simulate an installed environment where importing Databento genuinely
-    # fails. Merely removing/checking sys.modules is insufficient because
-    # Python can immediately re-import an installed package from site-packages.
+    """Deterministic simulation via ``monkeypatch.setitem(sys.modules,
+    "databento", None)`` -- never an environment-dependent
+    ``pytest.skip`` (Phase 4 correction §1: restored to the accepted
+    behavior after a prior Phase 4 delivery regressed this test)."""
     monkeypatch.setitem(sys.modules, "databento", None)
-
     health = get_system_health(
         make_settings(historical_provider=HistoricalProviderKind.DATABENTO, databento_api_key="real-key")
     )
@@ -187,8 +187,10 @@ def test_historical_market_data_not_listed_as_not_implemented_anymore():
     for component in health.components:
         if component.name == "Historical market data":
             assert component.state != HealthState.NOT_IMPLEMENTED
-    # but the still-future Phase 4 component must remain honestly
-    # NOT_IMPLEMENTED -- Phase 3 must not accidentally also "complete"
-    # real-time market data.
+    # Phase 4 note: "Real-time market data" now has its own real
+    # health check (see tests/test_live_data_health.py) and, with
+    # default/no-provider settings, truthfully reports NOT_CONFIGURED
+    # -- never NOT_IMPLEMENTED (the subsystem exists now) and never
+    # falsely CONFIGURED.
     realtime = health.component("Real-time market data")
-    assert realtime.state == HealthState.NOT_IMPLEMENTED
+    assert realtime.state == HealthState.NOT_CONFIGURED

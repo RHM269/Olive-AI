@@ -79,9 +79,10 @@ class SystemHealth:
 # strings through get_system_health(). "Futures domain" is handled
 # separately below via a real check now that Phase 2 implements it;
 # "Historical market data" is handled separately below via a real
-# check now that Phase 3 implements it.
+# check now that Phase 3 implements it; "Real-time market data" is
+# handled separately below via a real check now that Phase 4
+# implements it.
 _NOT_YET_IMPLEMENTED: tuple[tuple[str, str], ...] = (
-    ("Real-time market data", "Phase 4"),
     ("Feature engine", "Phase 5"),
     ("Strategy engine", "Phase 6"),
     ("Prediction engine", "Phase 7"),
@@ -210,15 +211,75 @@ def _check_historical_data(settings: Settings) -> ComponentHealth:
     )
 
 
+def _check_realtime_data(settings: Settings) -> ComponentHealth:
+    """Real health check for real-time market data (Phase 4).
+
+    Mirrors :func:`_check_historical_data` exactly: reports
+    ``NOT_CONFIGURED`` when no live provider is selected, or a
+    provider is selected but missing required configuration (no API
+    key, or the vendor package is not installed) --
+    :func:`~app.data.providers.live_factory.build_live_provider`
+    already names the exact reason in that case. Reports
+    ``CONFIGURED`` only once a real provider was actually constructed
+    (provider selected, API key present, vendor package importable) --
+    whether or not ``OLIVE_LIVE_NETWORK_ENABLED`` is also true, which
+    is noted in ``detail`` but does not change the reported state
+    (Phase 4 prompt §22: "if networking disabled but provider/key/
+    package otherwise valid, acceptable to report CONFIGURED while
+    noting network disabled"). Reports ``ERROR`` for configuration
+    that is present but broken.
+
+    This function -- and everything it calls -- never performs
+    network I/O and never opens a live connection; it only constructs
+    a provider object (see
+    ``app.data.providers.databento_live.DatabentoLiveProvider``'s own
+    guarantee that construction never calls its client factory).
+    """
+    from app.data.live_models import LiveDataError
+    from app.data.providers.live_factory import build_live_provider
+    from app.data.providers.unconfigured_live import UnconfiguredLiveProvider
+
+    try:
+        provider = build_live_provider(settings)
+    except LiveDataError as exc:
+        return ComponentHealth(
+            name="Real-time market data",
+            state=HealthState.ERROR,
+            detail=f"Real-time data provider configuration is broken: {exc}",
+        )
+
+    if isinstance(provider, UnconfiguredLiveProvider):
+        return ComponentHealth(
+            name="Real-time market data",
+            state=HealthState.NOT_CONFIGURED,
+            detail=provider.reason,
+        )
+
+    network_note = (
+        "network connections enabled"
+        if settings.live_network_enabled
+        else "network connections disabled (OLIVE_LIVE_NETWORK_ENABLED=false)"
+    )
+    dataset = getattr(provider, "dataset", "n/a")
+    return ComponentHealth(
+        name="Real-time market data",
+        state=HealthState.CONFIGURED,
+        detail=(
+            f"provider={provider.name}, dataset={dataset}, {network_note}, "
+            f"stale_threshold_seconds={settings.live_stale_threshold_seconds}."
+        ),
+    )
+
+
 def get_system_health(settings: Settings) -> SystemHealth:
     """Build Olive's current, truthful system health snapshot.
 
     ``System``, ``Configuration``, (as of Phase 2) ``Futures domain``,
-    and (as of Phase 3) ``Historical market data`` are reported as
-    real, verified state. Every subsystem still unimplemented
-    (real-time market data, features, strategies, predictions,
-    signals, backtesting, paper trading, alerts, web) is honestly
-    reported as ``NOT_IMPLEMENTED``.
+    (as of Phase 3) ``Historical market data``, and (as of Phase 4)
+    ``Real-time market data`` are reported as real, verified state.
+    Every subsystem still unimplemented (features, strategies,
+    predictions, signals, backtesting, paper trading, alerts, web) is
+    honestly reported as ``NOT_IMPLEMENTED``.
     """
     components: list[ComponentHealth] = [
         ComponentHealth(
@@ -236,6 +297,7 @@ def get_system_health(settings: Settings) -> SystemHealth:
         ),
         _check_futures_domain(),
         _check_historical_data(settings),
+        _check_realtime_data(settings),
     ]
 
     for name, phase in _NOT_YET_IMPLEMENTED:

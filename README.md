@@ -9,6 +9,118 @@ guaranteed outcomes.
 
 ## Current Status
 
+**Phase 4 — Real-Time Market Data**, corrected by a **Phase 4
+correction pass** and then a narrower **Phase 4.2 real-package
+hardening pass** (both below), is now implemented, building on
+**Phase 3 — Historical Market Data** (final and consolidated, below).
+
+Olive AI can now open a live streaming connection to a configured
+provider (Databento) for its exact NQ/MNQ production universe, and
+normalize vendor trade/quote/bar records into Olive's own `DataLabel.LIVE`
+domain events, strictly on explicit opt-in. By default (and in every
+test run), **no live provider is configured and live network access is
+disabled** -- nothing in this build can open a live connection without
+an operator deliberately setting `OLIVE_LIVE_PROVIDER=databento`,
+`DATABENTO_API_KEY`, and `OLIVE_LIVE_NETWORK_ENABLED=true`. This is a
+separate kill switch from Phase 3's historical one -- enabling either
+never enables the other. See `docs/realtime_data.md` for the full
+write-up, including this build's known limitations (the `databento`
+package could not be installed in this build sandbox, so its
+compatibility was verified only against duck-typed fakes matching its
+documented interface -- see that document's "Known limitations"
+section).
+
+The **Phase 4 correction pass** is a single consolidated correction to
+the originally delivered Phase 4 build, following an independent audit
+of the actual delivered artifact against Databento's documented 0.87
+Live API -- still Phase 4, not Phase 4.1 or a new phase. The audit
+found: the live client was constructed with an unsupported `dataset`
+kwarg and then had `.start()` called before synchronous iteration
+(both contradicting the documented API, the second of which the real
+client raises `ValueError` for); Databento's raw-symbol decade-reuse
+ambiguity (`NQZ6` means a different contract in 2026 vs. 2036) was left
+exploitable at the *live* layer -- unlike Phase 3's historical adapter,
+nothing authoritatively proved a subscribed contract's full-year
+identity before trusting its live `SymbolMappingMsg`; two Phase 3
+regression tests had regressed back to an environment-dependent
+`pytest.skip` CLAUDE.md and the original Phase 4 prompt both already
+prohibited; the fatal-`ErrorMsg` code list omitted two documented fatal
+conditions (`INTERNAL_ERROR`, `REPLAY_DATA_AGED_OUT`); a genuine,
+documented data-loss condition (`SKIPPED_RECORDS_AFTER_SLOW_READING`)
+was not surfaced at all; `reconnect_count`'s documentation promised
+"successful reconnections only" while the implementation also counted
+failed initial-connect attempts; `close()` used a blanket
+`except Exception: pass`; and Olive's own computed receive timestamp
+was discarded instead of being attached to every live event. All fixed
+-- including a new pre-connection, point-in-time symbology-resolution
+identity proof (reusing Phase 3's already-hardened resolver) that
+rejects a stream before it ever opens if any subscribed contract's
+full-year identity cannot be authoritatively confirmed for its own
+contract month, or if two subscribed contracts collide on the same
+resolved instrument ID -- with 40 new regression tests (1683 passed, 3
+environment-dependent skips for genuinely optional real-package checks,
+up from the original delivery's 1644 passed / 2 skipped) and manual
+adversarial reproduction against the finished code. See
+`docs/realtime_data.md` §8/§11 for the corrected mechanism and
+`CLAUDE.md`'s streaming/live-connection lessons for the durable
+takeaways.
+
+The **Phase 4.2 real-package hardening pass** is a second, narrower
+correction issued after a further independent audit of the corrected
+Phase 4 artifact -- still Phase 4, not a new phase; `CLAUDE.md` and
+both correction prompts explicitly prohibit a "Phase 4.1"/"Phase 5."
+The audit found four remaining real-Databento compatibility/lifecycle
+gaps the Phase 4 correction's own test doubles had been too permissive
+to expose: MBP-1 quote extraction still gated `levels[0]` on
+`isinstance(levels, (list, tuple))` and silently fell back to reading
+`bid_px`/`ask_px`/`bid_sz`/`ask_sz` off the whole `Mbp1Msg` record
+(fields that do not exist there) when that check failed, because every
+test double used a plain Python `list` for `levels` -- fixed to prefer
+Databento 0.87's documented flat `bid_px_00`/`ask_px_00`/`bid_sz_00`/
+`ask_sz_00` properties, and otherwise treat `levels` as genuinely
+indexable (narrow `try`/`except`, never `isinstance`), rejecting with
+an Olive-owned error when neither representation is usable; `close()`
+still suppressed *any* exception merely because its class module
+started with `databento`, which is still too broad a vendor-origin
+exception is not automatically harmless -- fixed to a three-way split
+(recognized-benign shutdown conditions suppressed; unexpected vendor
+exceptions translated into a new `LiveProviderShutdownError` and
+raised, never discarded; non-vendor exceptions always propagate); the
+mid-stream reconnect path replaced the old client with a new one
+without first attempting to stop it, risking a leaked connection --
+fixed with best-effort old-client cleanup (deliberately more
+permissive than `close()`'s own policy) before the new client is
+established; and the real-package offline compatibility check only
+inspected `Live`/`Historical` constructor signatures -- extended to
+also introspect the real `TradeMsg`/`Mbp1Msg`/`OhlcvMsg`/
+`SymbolMappingMsg`/`ErrorMsg`/`SystemMsg`/`BidAskPair` record classes'
+attribute names (still no network, no API key) whenever the real
+package is installed. All fixed, with 19 new regression tests (1702
+passed, 11 environment-dependent skips for genuinely optional
+real-package checks, up from the Phase 4 correction's 1683 passed / 3
+skipped) and the full non-regression checklist re-verified intact. See
+`docs/realtime_data.md` §6/§11/§14 for the corrected mechanisms.
+
+Live events (trades, quotes, one-second bars) are never persisted and
+never written to the Phase 3 historical Parquet store -- Phase 4 is a
+sibling subsystem to Phase 3, not an extension of it. A separate
+`LiveDataError` hierarchy, a separate `RealTimeMarketDataProvider`
+interface, and a separate `RealTimeDataService` gate pipeline (whole-
+domain and per-contract production-tradability checks, provider
+configuration, and the live network opt-in, in that order, before any
+connection is attempted) exist alongside Phase 3's equivalents without
+changing them. A real `Real-time market data` health check (mirroring
+Phase 3's own) never opens a connection merely to report
+`NOT_CONFIGURED` / `CONFIGURED` / `ERROR`.
+
+Olive still has **no feature engine, no predictive models, no
+strategies, no signals, and no web interface.** Olive does not predict
+NQ yet; it understands the instruments it will eventually trade
+(Phase 2), can build a historical record of their prices (Phase 3),
+and can now observe their live activity (Phase 4).
+
+### Phase 3 status (preserved)
+
 **Phase 3 — Historical Market Data**, corrected by a **Phase 3.1
 safety & integrity hardening pass**, a **Phase 3.2 final historical
 integrity correction**, a **Phase 3.3 canonical historical storage
@@ -116,12 +228,6 @@ protect are already independently guaranteed elsewhere. See
 `docs/historical_data.md` §20 for the full list and `CLAUDE.md`'s
 member-level/sibling-entry validation lessons, and the final ZIP's
 completion report for the complete compliance-ledger accounting.
-
-Olive still has **no real-time data, no predictive models, no
-strategies, no signals, and no web interface.** Olive does not predict
-NQ yet; it understands the instruments it will eventually trade
-(Phase 2) and can now build a historical record of their prices
-(Phase 3).
 
 Phase 2 (below) is preserved as originally written.
 
@@ -460,12 +566,73 @@ Phase 3.3 correction (following a further independent review of the
   to `tests/test_historical_data_storage_transaction.py` (now 53
   tests, up from 26)
 
+Real-time market data (Phase 4) -- see `docs/realtime_data.md` for full
+detail:
+
+- A provider-independent real-time-data interface with a safe default
+  (`UnconfiguredLiveProvider`, used whenever no provider is configured)
+  and a real Databento live adapter (`DatabentoLiveProvider`) that
+  subscribes only to Olive's exact, subscription-validated NQ/MNQ
+  contracts, normalizing Databento's trade/quote/OHLCV records into
+  Olive's own `LiveTrade`/`LiveQuote`/`LiveBar` domain events
+- Typed, self-validating live event objects storing prices as exact
+  `Decimal` values tick-aligned to the production instrument's own
+  tick size, each independently enforcing `data_label is DataLabel.LIVE`
+  in its own construction, regardless of which code path built it
+- A pre-connection, point-in-time symbology-resolution identity proof
+  (Phase 4 correction): before any live connection opens, every
+  subscribed contract's full-year identity is authoritatively resolved
+  against Databento's metadata endpoint, scoped to that contract's own
+  calendar month -- Databento's raw-symbol decade-reuse ambiguity
+  (`NQZ6` is `NQ`'s December contract in 2026 *and* 2036) is resolved
+  before it can ever matter, a contract not yet listed for its own
+  month fails closed, and two contracts colliding on the same resolved
+  instrument ID are rejected outright. Only then does exact-contract-
+  identity enforcement continue at the live-mapping layer: unmapped
+  instrument data is rejected (counted, not raised), a live
+  `SymbolMappingMsg` that contradicts a contract's own pre-verified
+  identity is rejected closed, and a contradictory remapping of the
+  same instrument ID to a different contract fails the stream closed
+- Bounded-exponential-backoff automatic reconnection on transient
+  connection failures (auth/permission failures are never retried),
+  with an injectable sleep function so reconnect-backoff behavior is
+  fully regression-tested without a single real sleep -- and truthful
+  reconnect telemetry (Phase 4 correction): `reconnect_count` counts
+  only successful re-establishments of a *previously lost* connection,
+  never an initial-connect retry, which is tallied separately in
+  `reconnect_attempts_total`
+- Explicit data-loss surfacing (Phase 4 correction): a documented
+  `SKIPPED_RECORDS_AFTER_SLOW_READING` condition transitions the stream
+  to a `DEGRADED` state and increments a cumulative `data_gap_count`,
+  clearing back to `CONNECTED` on the next successfully accepted event
+  -- Olive never continues as though a stream that lost data stayed
+  fully healthy. `close()` now only suppresses a narrowly recognized
+  vendor-side shutdown condition, never an unexpected exception (Phase
+  4 correction; no more blanket `except Exception: pass`)
+- Three independently preserved timestamps on every live event (Phase
+  4 correction): the exchange/event time (`ts_event`), Databento's own
+  receive time (`ts_recv`, when the schema supplies one), and Olive's
+  own local wall-clock receive time (`olive_received_at`) -- previously
+  computed but silently discarded
+- `RealTimeDataService.open_stream`, which gates every stream open
+  through Olive's whole-domain and per-contract production-tradability
+  checks (reusing Phase 2/Phase 3's existing validators, never
+  duplicating them), provider configuration, and an explicit, Phase-3-
+  independent network opt-in (`OLIVE_LIVE_NETWORK_ENABLED`) -- in that
+  order, before any connection is attempted
+- Session-aware staleness detection (`is_feed_unexpectedly_stale`) that
+  reuses Olive's own Globex session schedule so a legitimately closed
+  weekend or maintenance window is never misreported as an
+  unexpectedly stale feed
+- A real `Real-time market data` health check that never opens a
+  connection, reporting `NOT_CONFIGURED` (the honest default),
+  `CONFIGURED`, or `ERROR` for broken configuration
+
 ## Not Yet Implemented
 
 The following are intentionally **not** part of Olive AI yet and will be
 added in later phases:
 
-- Real-time market data (prices, quotes, bars)
 - Feature engine (technical, order-flow, session, cross-market)
 - Strategy framework
 - Machine-learning prediction engine
@@ -538,6 +705,15 @@ pytest
   NQ/MNQ request, and a passing cost check). Importing any module,
   loading settings, running the test suite, running `main.py`, or
   computing system health never performs network I/O or incurs cost.
+- As of Phase 4, Olive can open a real live connection to Databento,
+  but only via `RealTimeDataService.open_stream`, and only once every
+  safety gate in `docs/realtime_data.md` has passed (provider
+  configured with a real key, a valid NQ/MNQ subscription, and live
+  network access explicitly enabled via `OLIVE_LIVE_NETWORK_ENABLED`
+  -- a switch kept entirely independent of Phase 3's historical one).
+  Importing any module, loading settings, running the test suite,
+  running `main.py`, or computing system health never opens a live
+  connection.
 
 ## Development Roadmap
 
@@ -548,5 +724,6 @@ Olive Web, Advanced Intelligence, Always-On Operation, and Production
 Validation). Each phase is implemented and tested before the next
 begins. See `docs/architecture.md` for architecture details,
 `docs/futures_domain.md` for the full Phase 2 futures-domain write-up,
-and `docs/historical_data.md` for the full Phase 3 historical-data
-write-up.
+`docs/historical_data.md` for the full Phase 3 historical-data
+write-up, and `docs/realtime_data.md` for the full Phase 4 real-time-
+data write-up.

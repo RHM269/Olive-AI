@@ -47,10 +47,15 @@ def test_databento_selected_without_key_builds_unconfigured_naming_reason():
 
 
 def test_databento_selected_with_key_but_package_missing_builds_unconfigured(monkeypatch):
-    """Simulate an environment where importing Databento genuinely fails,
-    regardless of whether the real package is installed in this venv."""
+    """Deterministic simulation via ``monkeypatch.setitem(sys.modules,
+    "databento", None)`` -- never an environment-dependent
+    ``pytest.skip``. This must behave identically whether or not the
+    real 'databento' package happens to already be installed/imported
+    elsewhere in the process (Phase 4 correction §1: a prior Phase 4
+    delivery regressed this test back to the environment-dependent
+    skip pattern CLAUDE.md and the Phase 4 prompt both explicitly
+    prohibit; restored here to the accepted behavior)."""
     monkeypatch.setitem(sys.modules, "databento", None)
-
     provider = build_historical_provider(
         make_settings(historical_provider=HistoricalProviderKind.DATABENTO, databento_api_key="real-key")
     )

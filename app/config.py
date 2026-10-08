@@ -24,6 +24,23 @@ default string rendering; :meth:`Settings.historical_config_summary`
 is the one sanctioned way to describe historical configuration in
 status output, and it never includes the key itself, only whether one
 is present.
+
+Phase 4 addition: this module now also resolves Olive's real-time
+market-data configuration (``OLIVE_LIVE_PROVIDER``,
+``OLIVE_LIVE_NETWORK_ENABLED``, ``OLIVE_LIVE_STALE_THRESHOLD_SECONDS``,
+``OLIVE_LIVE_RECONNECT_MAX_ATTEMPTS``,
+``OLIVE_LIVE_RECONNECT_BASE_DELAY_SECONDS``,
+``OLIVE_LIVE_RECONNECT_MAX_DELAY_SECONDS``). ``DATABENTO_API_KEY`` is
+deliberately REUSED from Phase 3 rather than duplicated -- Olive has
+exactly one Databento credential, used by whichever of the historical
+and live subsystems is configured to use it. The live network kill
+switch (``OLIVE_LIVE_NETWORK_ENABLED``) is a SEPARATE field from the
+historical one (``OLIVE_HISTORICAL_NETWORK_ENABLED``) and defaults
+closed exactly the same way: enabling historical network access must
+never accidentally enable live network access, and vice versa -- each
+subsystem's network opt-in is independently fail-closed. Every new
+field is validated in ``__post_init__`` with the same bool-as-int/
+non-finite/negative discipline as the Phase 3 fields below.
 """
 
 from __future__ import annotations
@@ -83,6 +100,24 @@ class HistoricalProviderKind(str, Enum):
     DATABENTO = "databento"
 
 
+class LiveProviderKind(str, Enum):
+    """Which real-time market-data provider Olive is configured to use.
+
+    Phase 4 addition. Deliberately a SEPARATE enum from
+    :class:`HistoricalProviderKind` (even though today both have the
+    same two members) -- Olive's historical and live subsystems are
+    configured and network-gated independently, and keeping the enums
+    distinct means a future provider could be added to one subsystem
+    without implying anything about the other. ``UNCONFIGURED`` is the
+    only safe default. Selecting ``DATABENTO`` here does not, by
+    itself, authorize any network call -- see
+    ``OLIVE_LIVE_NETWORK_ENABLED`` below, which defaults closed.
+    """
+
+    UNCONFIGURED = "unconfigured"
+    DATABENTO = "databento"
+
+
 DEFAULT_APP_NAME = "Olive AI"
 DEFAULT_ENVIRONMENT = Environment.DEVELOPMENT
 DEFAULT_LOG_LEVEL = "INFO"
@@ -98,6 +133,15 @@ DEFAULT_HISTORICAL_DATA_DIR = _PROJECT_ROOT / "data" / "historical"
 _VALID_LOG_LEVELS = {"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"}
 _TRUE_STRINGS = {"1", "true", "yes", "on"}
 _FALSE_STRINGS = {"0", "false", "no", "off"}
+
+# -- Phase 4: real-time market-data configuration defaults -----------------
+
+DEFAULT_LIVE_PROVIDER = LiveProviderKind.UNCONFIGURED
+DEFAULT_LIVE_NETWORK_ENABLED = False
+DEFAULT_LIVE_STALE_THRESHOLD_SECONDS = Decimal("10")
+DEFAULT_LIVE_RECONNECT_MAX_ATTEMPTS = 5
+DEFAULT_LIVE_RECONNECT_BASE_DELAY_SECONDS = Decimal("1")
+DEFAULT_LIVE_RECONNECT_MAX_DELAY_SECONDS = Decimal("30")
 
 
 @dataclass(frozen=True)
@@ -118,6 +162,18 @@ class Settings:
     historical_data_dir: Path = DEFAULT_HISTORICAL_DATA_DIR
     historical_network_enabled: bool = DEFAULT_HISTORICAL_NETWORK_ENABLED
     historical_max_request_cost_usd: Decimal = DEFAULT_HISTORICAL_MAX_REQUEST_COST_USD
+
+    # -- Phase 4: real-time market-data configuration -------------------
+    # databento_api_key (above) is REUSED for the live subsystem -- see
+    # this module's docstring. live_network_enabled is a SEPARATE kill
+    # switch from historical_network_enabled: enabling one must never
+    # enable the other.
+    live_provider: LiveProviderKind = DEFAULT_LIVE_PROVIDER
+    live_network_enabled: bool = DEFAULT_LIVE_NETWORK_ENABLED
+    live_stale_threshold_seconds: Decimal = DEFAULT_LIVE_STALE_THRESHOLD_SECONDS
+    live_reconnect_max_attempts: int = DEFAULT_LIVE_RECONNECT_MAX_ATTEMPTS
+    live_reconnect_base_delay_seconds: Decimal = DEFAULT_LIVE_RECONNECT_BASE_DELAY_SECONDS
+    live_reconnect_max_delay_seconds: Decimal = DEFAULT_LIVE_RECONNECT_MAX_DELAY_SECONDS
 
     def __post_init__(self) -> None:
         """Validate and canonicalize the Phase 3 historical-data fields
@@ -206,6 +262,61 @@ class Settings:
             historical_data_dir = (_PROJECT_ROOT / historical_data_dir).resolve()
         object.__setattr__(self, "historical_data_dir", historical_data_dir)
 
+        # -- Phase 4 real-time market-data field validation --------------
+        # Same direct-construction-is-as-safe-as-the-loader discipline as
+        # every Phase 3 field above: a test, or any other caller building
+        # a Settings by hand, gets exactly the same guarantees as
+        # load_settings().
+        if not isinstance(self.live_provider, LiveProviderKind):
+            raise ConfigurationError(
+                f"Settings.live_provider must be a LiveProviderKind, got "
+                f"{self.live_provider!r} ({type(self.live_provider).__name__})"
+            )
+
+        if not isinstance(self.live_network_enabled, bool):
+            raise ConfigurationError(
+                f"Settings.live_network_enabled must be an actual bool (never a string, int, "
+                f"or anything else truthy/falsy-looking), got {self.live_network_enabled!r} "
+                f"({type(self.live_network_enabled).__name__}). A string such as \"false\" is "
+                f"truthy in Python and would silently bypass Olive's live-data network kill "
+                f"switch."
+            )
+
+        live_stale_threshold_seconds = _require_finite_positive_decimal(
+            self.live_stale_threshold_seconds, field_name="live_stale_threshold_seconds"
+        )
+        object.__setattr__(self, "live_stale_threshold_seconds", live_stale_threshold_seconds)
+
+        live_reconnect_max_attempts = self.live_reconnect_max_attempts
+        # bool is an int subtype -- rejected explicitly first, exactly
+        # like every other true-int field across this codebase.
+        if isinstance(live_reconnect_max_attempts, bool) or not isinstance(live_reconnect_max_attempts, int):
+            raise ConfigurationError(
+                f"Settings.live_reconnect_max_attempts must be a true int (never bool/float/"
+                f"str), got {live_reconnect_max_attempts!r} ({type(live_reconnect_max_attempts).__name__})"
+            )
+        if live_reconnect_max_attempts < 0:
+            raise ConfigurationError(
+                f"Settings.live_reconnect_max_attempts must not be negative; got "
+                f"{live_reconnect_max_attempts}"
+            )
+
+        live_reconnect_base_delay_seconds = _require_finite_positive_decimal(
+            self.live_reconnect_base_delay_seconds, field_name="live_reconnect_base_delay_seconds"
+        )
+        object.__setattr__(self, "live_reconnect_base_delay_seconds", live_reconnect_base_delay_seconds)
+
+        live_reconnect_max_delay_seconds = _require_finite_positive_decimal(
+            self.live_reconnect_max_delay_seconds, field_name="live_reconnect_max_delay_seconds"
+        )
+        if live_reconnect_max_delay_seconds < live_reconnect_base_delay_seconds:
+            raise ConfigurationError(
+                "Settings.live_reconnect_max_delay_seconds must be >= "
+                f"live_reconnect_base_delay_seconds; got max={live_reconnect_max_delay_seconds}, "
+                f"base={live_reconnect_base_delay_seconds}"
+            )
+        object.__setattr__(self, "live_reconnect_max_delay_seconds", live_reconnect_max_delay_seconds)
+
     @property
     def is_production(self) -> bool:
         return self.environment is Environment.PRODUCTION
@@ -235,6 +346,47 @@ class Settings:
             f"max_request_cost_usd={self.historical_max_request_cost_usd}, "
             f"data_dir={self.historical_data_dir}"
         )
+
+    def live_config_summary(self) -> str:
+        """A log/status-safe one-line description of Phase 4 real-time
+        configuration that never includes the API key itself.
+
+        Mirrors :meth:`historical_config_summary` exactly -- the one
+        sanctioned way to describe live configuration anywhere Olive
+        reports status to a human or a log.
+        """
+        return (
+            f"provider={self.live_provider.value}, "
+            f"databento_api_key={'configured' if self.has_databento_api_key else 'not set'}, "
+            f"network_enabled={self.live_network_enabled}, "
+            f"stale_threshold_seconds={self.live_stale_threshold_seconds}, "
+            f"reconnect_max_attempts={self.live_reconnect_max_attempts}, "
+            f"reconnect_base_delay_seconds={self.live_reconnect_base_delay_seconds}, "
+            f"reconnect_max_delay_seconds={self.live_reconnect_max_delay_seconds}"
+        )
+
+
+def _require_finite_positive_decimal(value: object, *, field_name: str) -> Decimal:
+    """Shared Phase 4 validator for the three new timing settings
+    (``live_stale_threshold_seconds``, ``live_reconnect_base_delay_seconds``,
+    ``live_reconnect_max_delay_seconds``) -- each must be an actual
+    ``Decimal`` (never bool/int/float/str, mirroring
+    ``historical_max_request_cost_usd``'s existing discipline above),
+    finite, and STRICTLY positive (unlike the historical cost limit,
+    which legitimately allows zero -- a zero stale-threshold or
+    zero-length backoff delay is not a meaningful value, so these three
+    fields require > 0, not merely >= 0).
+    """
+    if isinstance(value, bool) or not isinstance(value, Decimal):
+        raise ConfigurationError(
+            f"Settings.{field_name} must be a Decimal (never bool/int/float/str), got "
+            f"{value!r} ({type(value).__name__})"
+        )
+    if not value.is_finite():
+        raise ConfigurationError(f"Settings.{field_name} must be finite (not NaN/Infinity); got {value}")
+    if value <= 0:
+        raise ConfigurationError(f"Settings.{field_name} must be strictly positive; got {value}")
+    return value
 
 
 def _parse_environment(raw: str | None) -> Environment:
@@ -333,6 +485,71 @@ def _parse_historical_data_dir(raw: str | None) -> Path:
         ) from exc
 
 
+def _parse_live_provider(raw: str | None) -> LiveProviderKind:
+    if raw is None or raw.strip() == "":
+        return DEFAULT_LIVE_PROVIDER
+    normalized = raw.strip().lower()
+    try:
+        return LiveProviderKind(normalized)
+    except ValueError as exc:
+        valid = ", ".join(member.value for member in LiveProviderKind)
+        raise ConfigurationError(
+            f"Invalid OLIVE_LIVE_PROVIDER={raw!r}. Must be one of: {valid}"
+        ) from exc
+
+
+def _parse_live_network_enabled(raw: str | None) -> bool:
+    if raw is None or raw.strip() == "":
+        return DEFAULT_LIVE_NETWORK_ENABLED
+    normalized = raw.strip().lower()
+    if normalized in _TRUE_STRINGS:
+        return True
+    if normalized in _FALSE_STRINGS:
+        return False
+    raise ConfigurationError(
+        f"Invalid OLIVE_LIVE_NETWORK_ENABLED={raw!r}. "
+        f"Must be one of: {sorted(_TRUE_STRINGS | _FALSE_STRINGS)}"
+    )
+
+
+def _parse_positive_decimal_seconds(raw: str | None, *, var_name: str, default: Decimal) -> Decimal:
+    if raw is None or raw.strip() == "":
+        return default
+    try:
+        value = Decimal(raw.strip())
+    except InvalidOperation as exc:
+        raise ConfigurationError(f"Invalid {var_name}={raw!r}: must be a decimal number") from exc
+    if not value.is_finite():
+        raise ConfigurationError(f"Invalid {var_name}={raw!r}: must be finite")
+    if value <= 0:
+        raise ConfigurationError(f"Invalid {var_name}={raw!r}: must be strictly positive")
+    return value
+
+
+def _parse_live_reconnect_max_attempts(raw: str | None) -> int:
+    if raw is None or raw.strip() == "":
+        return DEFAULT_LIVE_RECONNECT_MAX_ATTEMPTS
+    stripped = raw.strip()
+    try:
+        value = int(stripped)
+    except ValueError as exc:
+        raise ConfigurationError(
+            f"Invalid OLIVE_LIVE_RECONNECT_MAX_ATTEMPTS={raw!r}: must be an integer"
+        ) from exc
+    # int("1.0") already raises ValueError above, but int("true") does
+    # too -- this guard exists purely so a literal "True"/"False" (which
+    # some shells/env-file authors might plausibly write for a
+    # boolean-shaped mistake) gets the same clear error rather than
+    # silently failing the int() parse with a confusing message. No
+    # bool-as-int risk here: `raw` is always a str from os.environ,
+    # never an actual bool object.
+    if value < 0:
+        raise ConfigurationError(
+            f"Invalid OLIVE_LIVE_RECONNECT_MAX_ATTEMPTS={raw!r}: must not be negative"
+        )
+    return value
+
+
 def load_settings(load_dotenv_file: bool = True) -> Settings:
     """Resolve :class:`Settings` from the current environment.
 
@@ -378,6 +595,27 @@ def load_settings(load_dotenv_file: bool = True) -> Settings:
         os.environ.get("OLIVE_HISTORICAL_MAX_REQUEST_COST_USD")
     )
 
+    live_provider = _parse_live_provider(os.environ.get("OLIVE_LIVE_PROVIDER"))
+    live_network_enabled = _parse_live_network_enabled(os.environ.get("OLIVE_LIVE_NETWORK_ENABLED"))
+    live_stale_threshold_seconds = _parse_positive_decimal_seconds(
+        os.environ.get("OLIVE_LIVE_STALE_THRESHOLD_SECONDS"),
+        var_name="OLIVE_LIVE_STALE_THRESHOLD_SECONDS",
+        default=DEFAULT_LIVE_STALE_THRESHOLD_SECONDS,
+    )
+    live_reconnect_max_attempts = _parse_live_reconnect_max_attempts(
+        os.environ.get("OLIVE_LIVE_RECONNECT_MAX_ATTEMPTS")
+    )
+    live_reconnect_base_delay_seconds = _parse_positive_decimal_seconds(
+        os.environ.get("OLIVE_LIVE_RECONNECT_BASE_DELAY_SECONDS"),
+        var_name="OLIVE_LIVE_RECONNECT_BASE_DELAY_SECONDS",
+        default=DEFAULT_LIVE_RECONNECT_BASE_DELAY_SECONDS,
+    )
+    live_reconnect_max_delay_seconds = _parse_positive_decimal_seconds(
+        os.environ.get("OLIVE_LIVE_RECONNECT_MAX_DELAY_SECONDS"),
+        var_name="OLIVE_LIVE_RECONNECT_MAX_DELAY_SECONDS",
+        default=DEFAULT_LIVE_RECONNECT_MAX_DELAY_SECONDS,
+    )
+
     return Settings(
         app_name=app_name,
         environment=environment,
@@ -388,4 +626,10 @@ def load_settings(load_dotenv_file: bool = True) -> Settings:
         historical_data_dir=historical_data_dir,
         historical_network_enabled=historical_network_enabled,
         historical_max_request_cost_usd=historical_max_request_cost_usd,
+        live_provider=live_provider,
+        live_network_enabled=live_network_enabled,
+        live_stale_threshold_seconds=live_stale_threshold_seconds,
+        live_reconnect_max_attempts=live_reconnect_max_attempts,
+        live_reconnect_base_delay_seconds=live_reconnect_base_delay_seconds,
+        live_reconnect_max_delay_seconds=live_reconnect_max_delay_seconds,
     )

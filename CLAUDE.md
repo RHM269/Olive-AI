@@ -426,6 +426,245 @@ rework's "every level of nesting" rule:
   reason to skip checking a field whose protected properties are NOT
   otherwise guaranteed.
 
+### Streaming/live-connection and counter-correctness lessons (from Phase 4, apply to every future streaming provider integration and every future "structured status/telemetry" object)
+
+Phase 4 (real-time market data) surfaced defect classes distinct from
+Phase 3's one-shot-fetch lessons above, specific to a long-lived
+streaming connection with its own reconnect/backoff lifecycle and its
+own running telemetry counters. General enough to check for in any
+future streaming integration (a second real-time vendor, a broker
+order-update stream, a websocket feed, ...):
+
+- **A telemetry counter must be incremented at every site the thing it
+  counts actually happens, not just the one internal helper that
+  happens to run most of the time.** `DatabentoLiveProvider`'s
+  `reconnect_count` was incremented correctly for every retry *inside*
+  the shared `_connect_with_reconnect` helper -- but a transient
+  failure encountered mid-stream (inside the long-lived `events()`
+  generator, calling that same helper to recover) did not separately
+  count as a new reconnection event once it succeeded. Before trusting
+  a counter in a status object, enumerate every call site that can
+  legitimately cause the thing being counted, not just the most
+  obvious one, and add a regression test that exercises the *less*
+  obvious site specifically (here: a transient failure after a
+  stream is already open and flowing, not only one at initial
+  connect time).
+- **A fetched-but-unused value is a sign of missing enforcement, not
+  acceptable dead code.** The adapter looked up each subscribed
+  instrument's own `tick_size` in `_normalize_record` and then never
+  used it -- the variable existed because tick-alignment enforcement
+  was the obviously-intended reason to fetch it, but the enforcement
+  itself had been left out. Before leaving an unused local variable in
+  place (or deleting it to "clean up"), ask what invariant its
+  presence implies should be checked, especially for a value pulled
+  from an already-validated domain object specifically to cross-check
+  untrusted provider data against it.
+- **Per-record field validation inside a long-lived stream must be
+  caught at the SAME narrow scope as the rest of that record's
+  validation, not left to escape to the whole stream's own exception
+  handling.** Adding real tick-alignment enforcement initially placed
+  the new check *outside* the existing `try/except LiveDataError`
+  block that already wrapped a trade/quote/bar's other field
+  conversions in `_normalize_record` -- so a single tick-misaligned
+  price would have propagated uncaught and killed the entire stream,
+  instead of being rejected as just that one malformed record (the
+  behavior every *other* field-validation failure in the same method
+  already had). When adding a new validation step to an existing
+  per-item error-handling block, always re-check that the new call is
+  actually inside that block, not appended after it by mistake.
+- **A vendor's wire-level sentinel convention that cannot be verified
+  against the real installed package must be resolved by the safest
+  available alternative, documented explicitly as provisional, and
+  flagged for verification -- never silently guessed at as if it were
+  confirmed.** Databento's exact "no resting order on this side of the
+  book" convention for a live quote could not be checked against the
+  real `databento` package in this sandbox; rather than assume an
+  unverified price-sentinel value, the adapter gates side-presence on
+  the order's SIZE (unambiguous: zero size always means no order,
+  regardless of what the paired price field contains). The decision
+  itself was sound, but the discipline that matters here is general:
+  when a vendor integration cannot be verified end-to-end, prefer the
+  interpretation that degrades safely if wrong, write down which
+  specific assumption was substituted and why, and say so again in the
+  completion report's known-limitations section -- never let an
+  unverified convenience assumption read as settled fact.
+
+### Re-verified vendor API shape and persistent-subscription identity lessons (from the Phase 4 correction pass, apply to every future streaming-provider integration and every future correction of a previously delivered build)
+
+An independent audit of the actual delivered Phase 4 build (not a new
+phase -- a single consolidated correction to the same Phase 4
+delivery) found that several of the "provisional, flagged for
+verification" assumptions documented above turned out to be
+outright wrong against the vendor's own documented API, not merely
+unverified, and that a vendor-side ambiguity problem Phase 3 had
+already solved for a one-shot fetch resurfaced, unaddressed, in a
+genuinely different form for a persistent subscription. Durable
+lessons, on top of (not replacing) the Phase 4 lessons above:
+
+- **"Documented API shape, not independently verified against the
+  real package" is not the same risk tier as "plausible-looking API
+  shape, never checked against the vendor's documentation at all."**
+  The originally delivered adapter constructed
+  `databento.Live(key=..., dataset="GLBX.MDP3")` and called
+  `client.start()` before synchronously iterating -- neither matches
+  the documented 0.87 API (`Live` takes no `dataset`; `start()` before
+  synchronous iteration is documented to raise `ValueError`), and
+  neither was flagged as an assumption anywhere, because neither was
+  ever checked against the vendor's documentation in the first place.
+  Every external call this codebase makes into a third-party client
+  needs its exact documented signature and lifecycle actually
+  consulted once, not inferred from a similar-looking call elsewhere
+  or from what "seems like" it should work -- and the compatibility
+  test doubles exercising that call need to be strict enough to catch
+  a regression back to the wrong shape (a fake constructor accepting
+  `**kwargs` unconditionally cannot catch an erroneously-passed
+  parameter; a fake requiring the exact documented parameter list
+  can).
+- **A vendor ambiguity problem solved for a one-shot fetch is NOT
+  automatically solved for a persistent subscription, even by the
+  exact same underlying vendor capability.** Phase 3's historical
+  adapter already resolved Databento's raw-symbol decade-reuse
+  ambiguity (`NQZ6` means a different contract in 2026 vs. 2036) via a
+  point-in-time `symbology.resolve` lookup before every paid fetch --
+  but the originally delivered Phase 4 live adapter never did the
+  equivalent for a live subscription, instead matching an incoming
+  `SymbolMappingMsg` to "the first subscribed contract sharing that
+  raw symbol." The underlying vendor ambiguity was identical; the
+  SHAPE of the fix had to be re-derived for the new context (a
+  pre-connection identity proof scoped to each contract's own
+  calendar month, performed once per `connect()`, via a SEPARATE
+  metadata client) rather than assumed solved because a sibling
+  module already solved "a" version of it. When a correction
+  introduces a second consumer of an already-hardened pure function
+  (here, `_distinct_resolved_instrument_id`, reused rather than
+  reimplemented), reusing the function is right, but reusing it does
+  not by itself prove the NEW call site's surrounding architecture
+  (when it's called, relative to what, and what happens on failure)
+  is correct for the new context -- that still has to be designed and
+  tested on its own terms.
+- **A telemetry counter's documented meaning must be enforced at
+  EVERY site that mutates it, including a site that increments it for
+  the WRONG reason.** The Phase 4 lessons above already cover a
+  counter that failed to increment at a legitimate site (a mid-stream
+  recovery). This correction found the complementary defect: the SAME
+  counter (`reconnect_count`, documented as "successful reconnections
+  only") was ALSO incremented at a site that should never have
+  touched it at all -- a failed attempt during the INITIAL connection,
+  which is not a reconnection (nothing was previously connected to
+  lose). A counter review must check not only "does it increment
+  everywhere it should" but also "does it increment ONLY where it
+  should" -- the two are independent failure modes, and fixing one
+  does not imply the other was ever checked. The fix here was
+  structural: split the single counter into two truthfully-named
+  ones (`reconnect_count` for successful re-establishments only,
+  `reconnect_attempts_total` for every attempt anywhere), rather than
+  trying to make one field honestly mean two different things.
+- **A non-session-fatal vendor condition that nonetheless represents
+  real data loss must be surfaced as its own explicit state, never
+  folded into the generic "harmless, streaming continues" bucket
+  merely because it isn't fatal.** `SKIPPED_RECORDS_AFTER_SLOW_READING`
+  is documented as not closing the connection -- but silently treating
+  it exactly like `SYMBOL_RESOLUTION_FAILED` or any other harmless
+  non-fatal code would let Olive report a fully healthy stream while
+  actually missing data. "Not fatal" and "harmless" are not the same
+  property; a condition that is non-fatal but lossy needs its own
+  third category (here: a `DEGRADED` state plus a cumulative
+  `data_gap_count`), distinct from both "closes the stream" and
+  "nothing happened."
+- **A blanket `except Exception: pass` is the same defect class
+  regardless of which lifecycle method it appears in.** The Phase
+  3.2 lessons above already cover this for a storage rollback path;
+  this correction found the identical anti-pattern in a live
+  connection's `close()`. The fix is the same general shape every
+  time: narrow the suppression to a SPECIFICALLY recognized, already-
+  classified condition (here, "exception originates from the vendor
+  package itself," reusing the exact helper already used for that
+  classification elsewhere in the same adapter), and let anything
+  else propagate, with a `finally` clause (not the `except` body)
+  responsible for guaranteeing a coherent end state.
+
+### Test-double fidelity and "narrow enough" shutdown/cleanup-exception lessons (from the Phase 4.2 real-package hardening pass, apply to every future vendor-record duck-typing boundary and every future shutdown/cleanup exception policy)
+
+A second independent audit of the corrected Phase 4 artifact found
+that every one of its four remaining defects was a defect the Phase 4
+correction's OWN test doubles had been too permissive to expose --
+not a new category of mistake, but the same category (an unverified
+or insufficiently narrow assumption) hiding one layer deeper, past a
+correction pass that had already fixed the previous round of these.
+Durable lessons, on top of (not replacing) every lesson above:
+
+- **A fake that always uses the most convenient built-in type can hide
+  an `isinstance` regression that a less convenient but equally valid
+  real-world type would expose immediately.** Every quote test double
+  in this adapter used a plain Python `list` for Databento's `levels`
+  field, so `isinstance(levels, (list, tuple))` always passed in
+  testing -- even though the real vendor's documented array type for
+  this exact field is indexable but NOT a `list`/`tuple` subclass. The
+  generic version of this lesson: when a test double stands in for a
+  vendor structure whose exact TYPE (not just its attribute shape)
+  matters to the code under test, at least one test double must
+  deliberately use a type that is duck-type-compatible but genuinely
+  NOT whatever convenient built-in the implementation might be
+  tempted to special-case against -- otherwise "every test passes"
+  proves nothing about whether the implementation special-cases a
+  built-in type the real vendor object doesn't actually subclass.
+- **"Narrower than a blanket swallow" is not automatically "narrow
+  enough" -- each narrowing has to be re-measured against what it
+  still permits, not just against what it replaced.** The Phase 4
+  correction's own narrowing of `close()` (from "suppress any
+  exception" to "suppress any exception whose module starts with
+  `databento`") was still audited as too broad a second time: a
+  vendor-origin exception is not automatically a harmless one. A
+  correction that narrows a scope should still be read, on its own,
+  for whether the new scope is _conceptually_ correct (does every
+  exception it still catches represent the EXACT condition the catch
+  is meant to handle?), not merely checked against the old, cruder
+  scope it replaced.
+- **"Best-effort cleanup of a resource already known to be broken" is
+  a genuinely different exception-handling policy than "normal,
+  deliberate shutdown of a resource assumed healthy" -- even when both
+  call the same underlying vendor method.** Stopping the OLD client
+  during a mid-stream reconnect (§4) deliberately absorbs a WIDER set
+  of vendor-origin exceptions than `close()` itself (§3) does, because
+  forcing a hard failure out of cleanup of a connection the caller
+  already knows is broken would convert one already-observed transient
+  failure into an unrelated second one -- whereas `close()` is called
+  on a connection with no such prior excuse. Reusing one lifecycle
+  method's exception-classification HELPER (`_is_databento_exception`)
+  across two call sites with deliberately different POLICIES (what to
+  do once that classification is known) is correct; collapsing both
+  call sites to the same policy because they call the same underlying
+  method is not.
+- **A duck-typed record-classification function and the normalization
+  function it feeds must be updated TOGETHER, or the classifier
+  silently routes a now-supported record shape to "unknown" rejection
+  instead of to the handler that was just taught to read it.** Adding
+  support for a second top-of-book representation (flat `*_00`
+  properties, with no `levels` attribute at all) to the quote-field
+  extraction helper, without also teaching `_classify_record` that a
+  record exposing ONLY those flat properties is still a `QUOTE`, left
+  such a record silently reclassified as `"unknown"` and rejected
+  before the new extraction logic was ever reached -- caught only by
+  actually running the new test against the real classification path,
+  not by reasoning about the extraction helper in isolation. Any
+  change to what shapes a normalization function can read must be
+  paired with a check of whether an earlier, upstream classification
+  step already decides which records are even offered to it.
+- **An offline-only, no-network, no-API-key check against a real
+  vendor package's own class objects (via `dir()`/`inspect`, never
+  instantiation) is cheap, safe to run in CI, and catches a real class
+  of defect no fake can: a published API's own shape silently changing
+  out from under an adapter's duck-typing assumptions.** Extending the
+  existing `Live`/`Historical` constructor-signature check to also
+  introspect the real record classes' attribute names
+  (`TradeMsg.sequence`, `Mbp1Msg`'s top-of-book attributes,
+  `OhlcvMsg.volume`, etc.) costs nothing when the package is absent
+  (skipped outright, `pytest.importorskip`) and directly confirms or
+  refutes a specific, previously-unverifiable assumption the moment it
+  runs somewhere the package IS installed -- this pattern should be
+  the default for any future vendor-record duck-typing boundary, not
+  something added only after an audit specifically asks for it.
+
 ### Full regression requirement before completion of any phase or correction
 
 1. Run the full existing regression suite.
